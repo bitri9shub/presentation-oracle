@@ -1,0 +1,1394 @@
+SOMMAIRE : SGA vs PGA, comprendre la mémoire Oracle sans jargon
+Code couleur : bleu = partagé (SGA), orange = privé (PGA)
+
+PROGRESSION : chaque partie répond à une question qui prépare la suivante.
+
+
+1. RAPPELS : LE MATÉRIEL ET L'OS (1:50)
+   Question : où vivent les données, et à quelle vitesse ?
+   3. Von Neumann : CPU, mémoire, . Le CPU ne traite que ce qui est en RAM.
+   
+   1. Fetch Stage (Retrieval)Program Counter (PC): Holds the memory address of the next instruction needed.Memory Address Register (MAR): The PC copies this address into the MAR.Address & Control Buses: The address travels along the address bus to main memory (RAM), while the Control Unit (CU) sends a read signal along the control bus.Memory Data Register (MDR): The instruction from that address travels back via the data bus and is saved in the MDR.Current Instruction Register (CIR): A copy of the instruction moves from the MDR into the CIR.PC Increment: The Program Counter updates (adds 1) to point to the next instruction.2. Decode Stage (Interpretation)Control Unit (CU): The CU looks at the instruction inside the CIR to figure out what the computer needs to do next.Opcode and Operand: The instruction splits into an opcode (the specific operation, like add or load) and an operand (the data or the memory address to use).Preparation: The CU prepares the necessary data paths and control signals for the hardware components.3. Execute Stage (Action)Carrying out the task: The CPU performs the required operation.Arithmetic Logic Unit (ALU): If it is math or logic (like addition or comparison), the ALU handles it.Data storage: Results are saved back into a register (like the Accumulator) or written back to main memory.Looping: The CPU immediately jumps back to the Fetch stage for the next instruction.
+   
+   4. Pyramide mémoire : registres 0,3 ns < L1 1 ns < L2 4 ns < L3 15 ns
+      < RAM 80 ns < SSD 50 µs < HDD 5 ms. Plus haut = plus rapide, plus petit, plus cher.
+      
+      Plus on se rapproche de l'ALU (Unité Arithmétique et Logique) au sein du processeur, plus la vitesse d'accès à la mémoire est ultra-rapide
+      
+   5. Espace d'adressage virtuel : code, data, heap, stack. Chaque processus a le sien.
+   
+   Chaque processus possède son propre espace de mémoire virtuelle, et cet espace est structuré de manière très précise en plusieurs zones (segments) distinctes, dont le Heap (le tas) et la Stack (la pile)
+   
+   6. Pagination et TLB : la MMU traduit adresse virtuelle -> physique (pages de 4 Ko).
+   
+   Pour traduire les adresses virtuelles de chaque processus en adresses physiques dans la RAM, la MMU (Memory Management Unit) utilise un mécanisme ultra-performant combinant la Pagination et le TLB (Translation Lookaside Buffer).
+   
+   1. La Pagination : Le découpage de la mémoirePour éviter de manipuler la mémoire octet par octet (ce qui serait beaucoup trop long), le système d'exploitation découpe la mémoire en blocs de taille fixe.Les Pages : Le découpage de la mémoire virtuelle du processus (généralement des blocs de 4 Ko).Les Cadres (Frames) : Le découpage de la mémoire physique (RAM) réelle, de la même taille (4 Ko).La Table des Pages (Page Table) : C'est le dictionnaire du processus. Elle est stockée en RAM et indique à quel cadre physique correspond chaque page virtuelle.Le problème de la Table des PagesChaque fois que le processeur (l'ALU) veut lire une donnée à une adresse virtuelle, la MMU doit :Aller chercher la Table des Pages en RAM pour trouver l'adresse physique.Aller chercher la vraie donnée en RAM à cette adresse physique.Résultat : Pour chaque accès mémoire, la MMU doit faire 2 accès à la RAM. Comme la RAM est lente par rapport à l'ALU, cela diviserait la vitesse de l'ordinateur par deux. C'est là qu'intervient le TLB.
+   
+   
+   2. Le TLB (Translation Lookaside Buffer) : L'accélérateurLe TLB est une petite mémoire cache ultra-rapide intégrée directement à la MMU (proche de l'ALU).Son rôle est simple : il garde en mémoire les traductions d'adresses les plus récentes. Au lieu de retourner chercher dans la Table des Pages en RAM, la MMU regarde d'abord dans le TLB.
+   3. Le cycle complet de traduction par la MMUQuand l'ALU demande une adresse virtuelle (composée du Numéro de Page + un Déplacement/Offset) :
+   
+                  [ ALU demande une Adresse Virtuelle ]
+                                │
+                                ▼
+                    ┌──────────────────────┐
+                    │  Regarder dans le    │
+                    │     Cache TLB        │
+                    └──────────┬───────────┘
+                               │
+                ┌──────────────┴──────────────┐
+          Oui (TLB Hit)                 Non (TLB Miss)
+                │                             │
+                ▼                             ▼
+   [ Traduction instantanée ]       [ Lire la Table des Pages ]
+        Trouvée dans la MMU              Dans la RAM (Lent)
+                │                             │
+                │                       ┌─────┴─────┐
+                │                       │ Charger   │
+                │                       │ dans TLB  │
+                │                       └─────┬─────┘
+                │                             │
+                └──────────────┬──────────────┘
+                               │
+                               ▼
+                [ Accès à l'Adresse Physique ]
+                    Dans la RAM réelle
+
+   
+   7. Mémoire partagée : deux processus, mêmes pages physiques (ipc.png).
+   À retenir : deux types de mémoire, privée (heap) et partagée (shmem).
+   Fondement de tout le reste : SGA = partagée, PGA = privée.
+   Lors d'un changement de contexte (context switch), c'est-à-dire lorsque le processeur arrête d'exécuter le processus A pour passer au processus B, le TLB pose un problème majeur de sécurité et de logique.
+Comme chaque processus possède sa propre mémoire virtuelle, la page 1 du processus A ne correspond pas du tout au même cadre physique (RAM) que la page 1 du processus B. Si on ne faisait rien, le processus B utiliserait par erreur les traductions du processus A restées dans le TLB, ce qui provoquerait des bugs ou des failles de sécurité massives.
+Pour résoudre ce problème, les processeurs utilisent l'une des deux méthodes suivantes :
+## Méthode 1 : Le vidage complet du TLB (TLB Flushing)
+C'est la méthode historique et la plus simple.
+
+* L'action : Dès que le système d'exploitation change de processus, il envoie un signal matériel pour effacer entièrement le TLB.
+* L'impact : Le TLB repart à zéro. Lorsque le processus B commence à s'exécuter, ses premiers accès mémoire vont tous provoquer des TLB Miss. La MMU va devoir retourner chercher chaque traduction dans la table des pages en RAM.
+* Le coût : Cela ralentit légèrement l'ordinateur à chaque changement de processus (on appelle cela le coût de "rechargement" ou de warm-up du TLB).
+
+## Méthode 2 : Le marquage par identifiant (ASID - Address Space Identifier)
+C'est la méthode utilisée par la majorité des processeurs modernes (notamment sur les architectures ARM et les CPU Intel/AMD récents).
+
+* L'action : On ajoute une petite étiquette (un badge) à chaque ligne du TLB : l'ASID. Cet identifiant unique est propre à chaque processus (par exemple, Processus A = ASID 1, Processus B = ASID 2).
+* Le fonctionnement : Lorsque le processus B s'exécute et demande la page 1, la MMU cherche dans le TLB une ligne qui correspond à la page 1 ET qui possède l'ASID du processus B.
+* L'avantage : Plus besoin de vider le TLB lors d'un changement de contexte. Les traductions du processus A restent sagement dans le cache, et si le processeur revient rapidement au processus A, elles seront toujours là et utilisables immédiatement.
+
+
+   
+   
+   
+   
+   
+
+2. BASES : PROCESSUS ET INSTANCE (2:20)
+   Question : qui travaille, et dans quel cadre ?
+   8. Processus vs thread ; foreground vs background.
+   Pour bien comprendre le fonctionnement d'un système d'exploitation, il faut distinguer la manière dont les programmes s'exécutent (Processus vs Thread) et la manière dont ils interagissent avec l'utilisateur (Foreground vs Background).
+------------------------------
+## 1. Processus vs Thread : Les unités d'exécution
+La différence fondamentale réside dans le partage des ressources et de la mémoire (le Heap, la Stack, etc., que nous avons vus plus haut).
+
+* Un Processus (Lourd) : C'est une application en cours d'exécution. Chaque processus possède sa propre mémoire virtuelle isolée (sa propre Stack, son propre Heap) et ses propres ressources.
+* Exemple : Ouvrir le navigateur Chrome et le lecteur VLC lance deux processus distincts. Si VLC plante, Chrome continue de fonctionner sans problème car ils sont totalement étanches.
+* Un Thread / Fil d'exécution (Léger) : C'est une sous-tâche qui s'exécute à l'intérieur d'un processus. Tous les threads d'un même processus partagent le même espace mémoire (le même Heap, les mêmes variables globales), mais chacun possède sa propre Stack pour gérer ses fonctions.
+* Exemple : Dans votre navigateur Chrome (un processus), un thread gère l'affichage de la page web, un autre télécharge un fichier en arrière-plan, et un troisième écoute les clics de votre souris. Si un thread corrompt la mémoire partagée (le Heap), c'est tout le processus qui peut planter.
+
+## Tableau comparatif direct
+
+| Caractéristique | Processus | Thread |
+|---|---|---|
+| Mémoire (Heap/Code) | Totalement isolée pour chaque processus. | Partagée entre tous les threads d'un processus. |
+| Mémoire (Stack) | Chaque processus a la sienne. | Chaque thread a sa propre Stack dédiée. |
+| Coût de création | Élevé (le système doit créer la mémoire virtuelle, charger le code). | Faible (utilise la mémoire déjà allouée au processus). |
+| Changement de contexte | Lent (nécessite de vider le TLB ou de changer d'ASID). | Très rapide (pas de changement de mémoire virtuelle). |
+| Impact en cas de crash | Si un processus plante, les autres survivent. | Si un thread plante gravement, tout le processus meurt. |
+
+------------------------------
+## 2. Foreground vs Background : L'interaction utilisateur
+Cette distinction concerne la priorité d'affichage et l'allocation des ressources par rapport à l'utilisateur.
+
+* Foreground (Premier plan) : C'est le processus ou le thread avec lequel l'utilisateur interagit directement en ce moment précis.
+* Caractéristiques : Il possède le "focus" de l'écran, reçoit les entrées du clavier et de la souris, et le système d'exploitation lui accorde une priorité maximale sur le processeur (CPU) pour garantir une fluidité parfaite.
+   * Exemple : Le traitement de texte sur lequel vous êtes en train de taper votre texte.
+* Background (Arrière-plan) : C'est un processus ou un thread qui s'exécute de manière invisible pour l'utilisateur, sans interface graphique active.
+* Caractéristiques : Sa priorité est plus basse. Le système peut réduire ses ressources si le premier plan en a besoin.
+   * Exemple : Une application de musique qui continue de jouer un morceau alors que votre téléphone est verrouillé, ou un antivirus qui analyse vos fichiers pendant que vous jouez à un jeu vidéo.
+
+   
+   
+   
+   9. Instance vs base : l'instance est éphémère (SGA + processus),
+      la base est durable (fichiers). STARTUP : NOMOUNT -> MOUNT -> OPEN.
+      
+## 1. Instance vs Base de données
+La règle d'or à retenir : L'instance s'exécute en mémoire, la base de données vit sur le disque.
+
+┌────────────────────────────────────────────────────────┐
+│ INSTANCE (Éphémère - S'arrête et démarre)              │
+│   ┌──────────────────────────┐   ┌───────────────────┐ │
+│   │ SGA (Mémoire partagée)   │   │ Processus Arrière │ │
+│   └──────────────────────────┘   └───────────────────┘ │
+└───────────────────────────┬────────────────────────────┘
+                            │ (Se connecte à...)
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│ BASE DE DONNÉES (Durable - Reste sur le disque)        │
+│  [Fichiers de données]  [Fichiers de contrôle]  [...]  │
+└────────────────────────────────────────────────────────┘
+
+## L'Instance (Éphémère)
+L'instance n'est qu'un ensemble de structures logicielles en mémoire vive (RAM). Si vous éteignez le serveur, l'instance disparaît. Elle est composée de deux éléments :
+
+* La SGA (Shared Global Area) : Une immense zone de mémoire RAM allouée par le système. Elle contient les caches (les blocs de données lus depuis le disque, le code SQL partagé, etc.) pour que l'ALU et le CPU y accèdent à toute vitesse.
+* Les Processus d'Arrière-plan (Background Processes) : Des threads/processus spécifiques (comme DBWn, LGWR, PMON, SMON) qui gèrent l'écriture sur disque, la maintenance et la sécurité de la base.
+
+## La Base de données (Durable)
+La base de données est l'ensemble des fichiers physiques stockés de manière permanente sur vos disques durs ou SSD. Même si l'instance est arrêtée, la base de données reste intacte. Elle comprend principalement :
+
+* Datafiles (Fichiers de données) : Où sont stockées vos tables et vos index.
+* Control Files (Fichiers de contrôle) : Les fichiers qui décrivent la structure physique de la base (emplacement des autres fichiers, état actuel).
+* Redo Log Files (Fichiers de journalisation) : Les fichiers qui enregistrent toutes les modifications en temps réel pour pouvoir réparer la base en cas de panne de courant.
+
+------------------------------
+## 2. Le mécanisme de STARTUP : NOMOUNT -> MOUNT -> OPEN
+Pour démarrer une base de données, l'administrateur tape la commande STARTUP. Le système passe alors par 3 étapes successives et logiques pour lier l'Instance à la Base.
+## Étape 1 : Le mode NOMOUNT (Création de l'Instance)
+
+* Ce qui se passe : Le système lit un fichier de configuration (appelé init.ora ou SPFILE). Grâce à lui, il sait combien de RAM allouer.
+* Résultat : L'instance est créée. La mémoire SGA est allouée en RAM et les processus d'arrière-plan démarrent.
+* Lien avec le disque : Aucun fichier de la base de données n'est encore ouvert ni même vérifié. Le système ne sait pas encore où se trouvent vos données.
+* Utilité : Permet de créer une base de données à partir de zéro ou de recréer un fichier de contrôle perdu.
+
+## Étape 2 : Le mode MOUNT (Lien entre l'Instance et la Base)
+
+* Ce qui se passe : L'instance cherche et ouvre les Fichiers de Contrôle (Control Files) dont le chemin était indiqué dans le fichier de configuration. Elle lit ces fichiers pour savoir exactement où se trouvent les fichiers de données (Datafiles) et les Redo Logs.
+* Résultat : L'instance est liée à sa base de données.
+* Lien avec le disque : L'instance connaît l'emplacement de tous les fichiers, mais les données ne sont pas encore accessibles aux utilisateurs. Les fichiers de données restent fermés et verrouillés.
+* Utilité : Permet de faire des opérations de maintenance lourdes (renommer un fichier de données, activer le mode d'archivage des logs, restaurer une sauvegarde).
+
+## Étape 3 : Le mode OPEN (Ouverture aux utilisateurs)
+
+* Ce qui se passe : L'instance ouvre tous les Fichiers de données (Datafiles) et les Redo Logs. Elle vérifie que tous les fichiers sont synchronisés et qu'aucune panne n'a eu lieu au dernier arrêt. Si nécessaire, les processus d'arrière-plan (SMON) effectuent une récupération automatique.
+* Résultat : La base de données est ouverte.
+* Lien avec le disque : Les fichiers sont pleinement accessibles. Les utilisateurs et les applications peuvent se connecter et exécuter des requêtes SQL (SELECT, INSERT, etc.).
+
+
+      
+      
+   10. Serveur dédié : 1 client = 1 processus serveur = 1 PGA.
+
+   
+   
+   
+   
+   Dans l'architecture d'une base de données comme Oracle, le mode Serveur Dédié (Dedicated Server) est le modèle de connexion le plus simple et le plus performant pour les applications critiques.
+La règle d'or de ce mode est l'alignement strict : 1 connexion client = 1 processus serveur dédié sur la machine = 1 zone mémoire PGA privée.
+------------------------------
+## 1. Comment fonctionne la trinité "Client - Processus - PGA" ?
+Lorsque l'application de votre utilisateur se connecte à la base de données, une chaîne exclusive se met en place :
+
+[ Application Client ] 
+          │
+          ▼  (Se connecte via le réseau)
+┌────────────────────────────────────────────────────────┐
+│ SERVEUR DE BASE DE DONNÉES (Machine)                  │
+│                                                        │
+│  ┌────────────────────────┐                             │
+│  │ Processus Serveur Dédié│ ◄── Dédié à CE client seul │
+│  └───────────┬────────────┘                             │
+│              │ (Possède sa propre...)                  │
+│              ▼                                         │
+│  ┌────────────────────────┐                             │
+│  │       Zone PGA         │ ◄── Mémoire privée non      │
+│  │ (Program Global Area)  │     partagée dans la RAM   │
+│  └────────────────────────┘                             │
+└────────────────────────────────────────────────────────┘
+
+## 1. Le Client (Le processus utilisateur)
+C'est le programme qui tourne sur le poste de l'utilisateur ou sur un serveur web (par exemple, un script PHP, une application Java, ou un outil comme SQL Developer). Ce processus client émet des requêtes SQL mais ne sait pas les exécuter lui-même sur les fichiers.
+## 2. Le Processus Serveur Dédié (Le travailleur)
+Dès que le client se connecte, le système d'exploitation du serveur crée un processus système unique (ou un thread sous Windows). Ce processus est le représentant exclusif du client sur le serveur.
+
+* Il reçoit les ordres SQL du client.
+* Il va chercher les données dans la mémoire globale (SGA) ou sur le disque.
+* Il renvoie les résultats au client.
+* Il ne traite jamais les requêtes d'un autre client. Si le client ne fait rien, ce processus dort et attend.
+
+## 3. La PGA (Program Global Area - La mémoire privée)
+Contrairement à la SGA qui est partagée entre tout le monde, la PGA est une zone de mémoire RAM allouée par le système d'exploitation spécifiquement pour ce processus serveur dédié.
+Aucun autre processus de la base de données ne peut lire ou écrire dans cette PGA.
+------------------------------
+## 2. Que contient la PGA d'un processus dédié ?
+Puisqu'elle est privée, elle stocke toutes les informations temporaires liées à l'activité de l'utilisateur en cours :
+
+* La zone de tri (Sort Area) : Si l'utilisateur fait un ORDER BY ou un GROUP BY sur un gros volume de données, le processeur effectue le tri des lignes à l'intérieur de cette PGA.
+* La zone de hachage (Hash Area) : Utilisée pour lier deux tables rapidement lors d'une jointure (HASH JOIN).
+* L'état de la session : Les variables de session SQL, l'historique des curseurs ouverts, et les droits de l'utilisateur.
+
+------------------------------
+## 3. Avantages et Inconvénients du Serveur Dédié## Les Avantages
+
+* Performance maximale : Le processus est toujours prêt pour son client. Il n'y a aucun temps d'attente pour obtenir un processus disponible.
+* Isolation totale : Si la session d'un utilisateur effectue un tri gigantesque et sature sa mémoire PGA, seule sa session sera ralentie ou plantée. Les autres clients continuent de travailler normalement.
+
+## Les Inconvénients
+
+* Gourmand en ressources : Si vous avez 5000 utilisateurs connectés en même temps, le serveur doit gérer 5000 processus et 5000 zones PGA en RAM. Même si les utilisateurs ne font rien, la mémoire reste monopolisée.
+
+
+   
+   
+   
+   
+   
+   Pour gérer des milliers d'utilisateurs connectés sans faire exploser la mémoire RAM du serveur, l'alternative au mode serveur dédié est le mode Serveur Partagé (Shared Server).
+La règle d'or change complètement : Les connexions des clients sont mutualisées. Un petit groupe de processus serveurs se partage le travail de tout le monde [1].
+------------------------------
+## 1. L'Architecture du Serveur Partagé
+Pour casser le lien exclusif entre le client et le processus, le système introduit deux nouveaux intermédiaires : le Dispatcher (le répartiteur) et la File d'attente (Request Queue).
+
+[ Client 1 ] ──┐
+[ Client 2 ] ──┼─► [ Dispatcher ] ──► [ File d'attente ] ──► [ Processus Serveur Partagé 1 ]
+[ Client 3 ] ──┘     (Le guichet)       (Request Queue)      [ Processus Serveur Partagé 2 ]
+                                                               (Les serveurs disponibles)
+
+
+   1. Le Dispatcher (Le Guichet) : Le client ne parle plus directement à un processus serveur. Il envoie sa requête SQL au Dispatcher. Le Dispatcher prend la requête et la place dans une file d'attente commune en mémoire (SGA).
+   2. Le Pool de Processus Partagés : Un nombre fixe et réduit de processus serveurs (par exemple, seulement 20 processus pour 1000 utilisateurs) surveillent la file d'attente. Dès qu'un processus se libère, il prend la première requête de la file, l'exécute, et remet le résultat au Dispatcher, qui le renvoie au bon client.
+
+------------------------------
+## 2. Le grand changement pour la mémoire (SGA vs PGA)
+Dans ce mode, un processus serveur partagé doit pouvoir traiter la requête du Client 1, puis la seconde d'après, celle du Client 2.
+
+* Le problème : Comme vu précédemment, les informations de session et les tris d'un client sont stockés dans sa zone privée (PGA). Si ces données restaient dans la PGA du processus 1, le processus 2 ne pourrait pas reprendre le travail du client.
+* La solution : En mode serveur partagé, la mémoire de session du client (appelée l'UGA - User Global Area) est déplacée de la PGA vers la SGA (mémoire globale partagée). Ainsi, peu importe quel processus serveur partagé attrape la requête dans la file d'attente, il peut accéder aux données de session du client puisqu'elles sont dans la zone commune (SGA).
+
+------------------------------
+## 3. Comparaison : Dédié vs Partagé
+
+| Caractéristique | Serveur Dédié (Dedicated) | Serveur Partagé (Shared) |
+|---|---|---|
+| Nombre de processus | Égal au nombre de clients connectés. | Très inférieur au nombre de clients (Pool). |
+| Emplacement des données de session (UGA) | Dans la PGA (Mémoire privée du processus). | Dans la SGA (Mémoire partagée globale). |
+| Utilisation idéale | Longues requêtes lourdes, batchs, sauvegardes, connexions d'administrateurs (DBA). | Nombreuses connexions courtes (ex: applications web avec des milliers de petits clics). |
+| Comportement si le client dort | Le processus serveur dédié dort aussi et consomme de la RAM pour rien. | Le processus partagé traite les requêtes des autres clients actifs. |
+
+En résumé, le serveur partagé fonctionne comme un centre d'appels : peu importe quel conseiller décroche, il peut ouvrir votre dossier (dans la SGA) et répondre à votre question, permettant à 20 conseillers de gérer des centaines de clients par heure.
+Nous avons fait le tour de l'architecture physique et mémoire (processus, RAM, disques, sessions).
+
+
+   
+   11. Les 5 processus background étudiés : DBWn, LGWR, CKPT, SMON, PMON.
+       Tableau : rôle + interaction avec la SGA.
+       
+       Ces 5 processus d'arrière-plan (Background Processes) constituent le cœur de l'infrastructure logicielle d'une instance de base de données (comme Oracle). Ils s'exécutent en tâche de fond pour assurer la maintenance, la performance et la survie de la base de données.
+Voici le tableau récapitulatif de leurs rôles et de leurs interactions précises avec les composants de la SGA (mémoire partagée) et les fichiers de la base (disque).
+## Tableau : Rôles et interactions avec la SGA
+
+| Processus | Nom complet | Rôle Principal | Interaction avec la SGA (RAM) | Interaction avec le Disque |
+|---|---|---|---|---|
+| DBWn (n = 1, 2...) | DataBase Writer | Écrit les données modifiées de la mémoire vers le disque de manière asynchrone pour libérer de la place en RAM. | Lit le Buffer Cache (à la recherche de blocs "sales"/modifiés appelés dirty buffers). | Écrit dans les Datafiles (Fichiers de données). |
+| LGWR | Log Writer | Écrit les journaux de transaction immédiatement sur le disque lors d'un COMMIT pour garantir la durabilité. | Lit en continu le Redo Log Buffer (les reçus des modifications). | Écrit dans les Redo Log Files (Fichiers de journalisation). |
+| CKPT | Checkpoint | Déclenche un point de contrôle pour synchroniser l'état de la mémoire et des fichiers, et écrit les métadonnées. | Met à jour les structures de contrôle de la base stockées en SGA. | Écrit l'avancement (le SCN) dans les Control Files et l'en-tête des Datafiles. |
+| SMON | System Monitor | Nettoie le système. Il gère la récupération automatique de l'instance lors d'un crash au démarrage (STARTUP). | Réalloue et gère l'espace libre dans les structures globales de la SGA. | Lit les Redo Logs et met à jour les Datafiles lors d'un crash recovery. |
+| PMON | Process Monitor | Nettoie les sessions en échec. Si un processus client plante, il libère ses ressources et ses verrous. | Libère les verrous et la mémoire de session (UGA) qui étaient bloqués dans la SGA. | Communique indirectement avec les processus système. |
+
+------------------------------
+## Zoom sur le fonctionnement de chaque processus
+
+* DBWn : Il ne travaille pas dans l'urgence. Il attend que le Buffer Cache soit trop plein de données modifiées, ou qu'un signal de CKPT lui demande de vider une partie de la mémoire pour écrire dans les tables physiques (Datafiles).
+* LGWR : C'est le processus le plus pressé et le plus critique. Il écrit dès qu'un utilisateur tape COMMIT, toutes les 3 secondes, ou dès que le Redo Log Buffer est rempli au tiers.
+* CKPT : Il agit comme un chef d'orchestre du temps. Lors d'un Checkpoint, il dit à DBWn d'écrire les données en retard, puis il va mettre à jour le numéro de séquence (SCN - System Change Number) dans le fichier de contrôle. Cela permet de savoir jusqu'où la base est à jour sur le disque.
+* SMON : Si l'électricité est coupée, au redémarrage, SMON se lève en premier. Il applique le journal de transaction (Roll-Forward) pour remettre la base dans l'état exact où elle était lors du crash.
+* PMON : Si un utilisateur débranche sauvagement son câble réseau en pleine transaction, PMON détecte que le processus client est mort. Il effectue un ROLLBACK automatique de sa transaction en cours et libère les lignes de la table qui étaient verrouillées pour que les autres utilisateurs puissent y accéder.
+
+
+
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+   12. Une SGA, N PGA : première vue d'ensemble.
+   Analogie : processus = acteur, instance = scène, mémoire = espace de travail.
+   
+   
+   
+   Pour bien fixer l'architecture globale d'une base de données, il faut comprendre l'équilibre entre l'espace collectif (la SGA) et les espaces individuels (les PGA).
+La règle d'or est simple : Dans une instance, il y a toujours une seule et unique SGA (partagée), mais il y a autant de PGA (privées) qu'il y a de processus en cours.
+------------------------------
+## 1. L'Analogie Théâtrale : Comprendre l'Architecture
+Pour visualiser facilement l'interaction entre ces composants, utilisons l'analogie du théâtre :
+
+* L'Instance = La Scène de théâtre : C'est l'espace vivant, éphémère et en action. Tant que la pièce est jouée (tant que l'instance est démarrée), la scène existe. Si on éteint les feux (arrêt de l'instance), la scène redevient vide.
+* Les Processus = Les Acteurs : Ce sont les entités physiques qui font le travail.
+* Certains acteurs ont des rôles spécifiques en arrière-plan (DBWn, LGWR, PMON font partie de la troupe technique).
+   * D'autres acteurs sont des processus serveurs dédiés, engagés pour jouer le texte (les requêtes SQL) dicté par un spectateur (le client).
+* La SGA = Les Décors et Accessoires communs (sur la scène) : C'est un immense espace au milieu de la scène. Tous les acteurs y ont accès en même temps. Si un acteur y dépose un accessoire (un bloc de données lu depuis le disque), un autre acteur peut l'attraper immédiatement sans avoir à retourner dans les coulisses (le disque).
+* La PGA = Le Script personnel et la Loge de l'acteur : Chaque acteur possède sa propre loge privée et son propre carnet de notes. Un acteur ne peut pas entrer dans la loge d'un autre. Il y stocke ses données personnelles (ses variables de session) et y prépare ses répliques ou ses mouvements complexes (ses tris et ses hachages).
+
+------------------------------
+## 2. Le Modèle : 1 SGA, N PGA
+
+┌───────────────────────────────────────────────────────────┐
+│ INSTANCE (La Scène)                                       │
+│                                                           │
+│    ┌─────────────────────────────────────────────────┐    │
+│    │                  UNE SEULE SGA                  │    │
+│    │             (L'Espace Collectif)                │    │
+│    │  [Buffer Cache]  [Shared Pool]  [Log Buffer]    │    │
+│    └───────────────────────▲─────────────────────────┘    │
+│                            │ (Accès partagé)              │
+│            ┌───────────────┼───────────────┐              │
+│            │               │               │              │
+│    ┌───────▼───────┐┌──────▼───────┐┌──────▼───────┐      │
+│    │  Processus 1  ││  Processus 2  ││  Processus N  │      │
+│    │   (Acteur)    ││   (Acteur)    ││   (Acteur)    │      │
+│    └───────┬───────┘└──────┬───────┘└──────┬───────┘      │
+│            │               │               │              │
+│    ┌───────▼───────┐┌──────▼───────┐┌──────▼───────┐      │
+│    │     PGA 1     ││     PGA 2     ││     PGA N     │      │
+│    │ (Loge Privée) ││ (Loge Privée) ││ (Loge Privée) │      │
+│    └───────────────┘└───────────────┘└───────────────┘      │
+└───────────────────────────────────────────────────────────┘
+
+## Pourquoi une seule SGA ?
+La SGA (Shared Global Area) doit être unique pour centraliser les données de la base. Si chaque processus avait sa propre copie des tables de la base de données, deux utilisateurs ne verraient jamais la même chose et l'ordinateur gaspillerait toute sa RAM en doublons. La SGA garantit la cohérence : un seul endroit en mémoire pour les données communes.
+## Pourquoi N PGA ?
+Chaque PGA (Program Global Area) doit être isolée pour que les processus ne se marchent pas sur les pieds. Si deux acteurs essaient de trier des listes de clients différentes dans le même carnet de notes, le résultat sera un désastre. La PGA fournit la tranquillité et la sécurité nécessaires à chaque travailleur pour exécuter sa tâche.
+
+
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+
+3. LA SGA : LA MÉMOIRE PARTAGÉE 
+
+   13. Définition et dimensionnement : unique, allouée au STARTUP, volatile ;
+       SGA_TARGET (ASMM) ; HugePages.
+       Dans l'architecture Oracle, la gestion de la SGA (Shared Global Area) a considérablement évolué pour simplifier le travail des administrateurs tout en maximisant les performances du processeur (ALU).
+Voici l'explication technique de sa définition, de son dimensionnement dynamique via SGA_TARGET et de l'optimisation matérielle par les HugePages.
+------------------------------
+## 1. Définition et Cycle de Vie de la SGA
+La SGA répond à trois caractéristiques fondamentales :
+
+* Unique : Il n'existe qu'une seule SGA par instance de base de données. Tous les processus (serveurs et arrière-plan) s'y connectent pour partager les données.
+* Allouée au STARTUP : La SGA n'existe pas tant que la commande STARTUP n'a pas été lancée. Dès l'étape NOMOUNT, le système d'exploitation alloue un bloc massif de mémoire RAM continue à l'instance, basé sur les paramètres de configuration.
+* Volatile : La SGA vit uniquement dans la mémoire vive (RAM). Si le serveur subit une panne de courant ou si l'instance est arrêtée (SHUTDOWN), tout le contenu de la SGA (les caches de données, les plans d'exécution SQL) est immédiatement effacé. Seule la base de données sur disque (durable) conserve les informations.
+
+------------------------------
+## 2. Le Dimensionnement Automatique : SGA_TARGET (ASMM)
+Historiquement, un administrateur (DBA) devait manuellement spécifier la taille de chaque sous-composant de la SGA (le Buffer Cache, le Shared Pool, le Large Pool, etc.). Si le Shared Pool manquait de place alors que le Buffer Cache en avait trop, la base plantait.
+Pour résoudre cela, Oracle a introduit l'ASMM (Automatic Shared Memory Management) via le paramètre SGA_TARGET :
+
+       [ Taille globale fixée par SGA_TARGET = 16 Go ]
+                             │
+            ┌────────────────┴────────────────┐
+            ▼ (Répartition dynamique par ASMM) ▼
+┌──────────────────────┐ ┌──────────────────────┐ ┌────────────────┐
+│  Buffer Cache (RAM)  │ │  Shared Pool (RAM)   │ │ Autres pools   │
+│     (ex: 10 Go)      │ │     (ex: 5 Go)       │ │   (ex: 1 Go)   │
+└──────────────────────┘ └──────────────────────┘ └────────────────┘
+      ▲                        ▲
+      └───────── Échange ──────┘  (ASMM ajuste les tailles en temps 
+                                  réel selon la charge de travail)
+
+
+* Le principe : Le DBA fixe uniquement la taille globale de la SGA à l'aide du paramètre SGA_TARGET (par exemple, SGA_TARGET = 16G).
+* L'automatisme : Un processus d'arrière-plan interne surveille l'utilisation de la mémoire. Si l'application effectue énormément de requêtes SQL différentes, le système va automatiquement réduire la taille du Buffer Cache pour agrandir le Shared Pool, sans interruption de service et sans intervention humaine.
+
+------------------------------
+## 3. L'Optimisation Matérielle : Les HugePages (Sous Linux)
+Lorsque la SGA devient très grande (plusieurs dizaines ou centaines de gigaoctets), le mécanisme classique de la MMU et de la Table des Pages (que nous avons vu au début) commence à saturer le processeur.
+## Le problème sans HugePages
+Par défaut, Linux découpe la mémoire en petites pages de 4 Ko. Si votre SGA fait 64 Go, la Table des Pages devra contenir 16 millions de lignes pour cartographier cette mémoire. Cette table devient tellement gigantesque qu'elle ne tient plus dans le cache TLB du processeur, provoquant une explosion des TLB Miss et ralentissant l'ALU.
+## La solution : Les HugePages
+Les HugePages permettent au système d'exploitation Linux d'allouer des pages de mémoire beaucoup plus grandes (généralement 2 Mo ou plus au lieu de 4 Ko) spécifiquement pour la SGA.
+
+* Réduction de la Table des Pages : Pour une SGA de 64 Go, on passe de 16 millions de pages à seulement 32 000 pages. La table devient minuscule.
+* TLB Hit à 100% : La table des pages étant très petite, elle tient entièrement dans le cache TLB de la MMU. L'ALU obtient instantanément l'adresse physique de la SGA.
+* Mémoire verrouillée : Les HugePages sont verrouillées en RAM. Le système d'exploitation ne peut jamais les envoyer sur le disque dur (pas de Swapping/Paging), ce qui garantit des performances maximales et constantes pour l'instance.
+
+
+
+
+       
+       
+       
+       
+       
+       
+   14. Vue d'ensemble des composants : 4 principaux + Fixed SGA et pools secondaires.
+   La SGA (Shared Global Area) n'est pas un bloc de mémoire monolithique. C'est une structure segmentée en plusieurs zones spécialisées appelées Pools. Chaque pool a un rôle précis pour optimiser les performances de la base de données.
+La SGA se compose de 4 composants principaux, d'une zone fixe incontournable (Fixed SGA), et de plusieurs pools secondaires.
+------------------------------
+## 1. Les 4 Composants Principaux (Les Piliers)
+Ces quatre zones consomment généralement la quasi-totalité de l'espace alloué par SGA_TARGET.
+
+* Le Database Buffer Cache : C'est la réplique en RAM des données du disque. Lorsqu'un processus serveur a besoin d'une ligne d'une table, il lit le bloc entier depuis le fichier de données (Datafile) et le stocke ici. Si un autre utilisateur demande les mêmes données, elles sont lues directement depuis ce cache, évitant un accès disque lent.
+* Le Shared Pool : C'est le cerveau de la SGA dédié au code. Il contient le Library Cache (qui stocke les plans d'exécution des requêtes SQL compilées pour éviter de les réanalyser à chaque fois) et le Data Dictionary Cache (qui stocke les métadonnées : définitions des tables, colonnes et droits des utilisateurs).
+* Le Redo Log Buffer : C'est une mémoire tampon circulaire ultra-rapide. Dès qu'une donnée est modifiée, le reçu du changement (le vecteur de redo) y est inscrit. Comme nous l'avons vu, le processus LGWR vide ce buffer en continu vers les fichiers Redo Log sur le disque.
+* Le Large Pool : Une zone optionnelle mais fortement recommandée. Elle est dédiée aux allocations de mémoire massives qui risqueraient d'encombrer le Shared Pool. Elle sert principalement pour les sauvegardes/restaurations lourdes (Oracle RMAN), les processus parallèles, et pour stocker la session des utilisateurs (UGA) si vous utilisez le mode Serveur Partagé.
+
+------------------------------
+## 2. La Fixed SGA (La boussole interne)
+La Fixed SGA est une toute petite zone de la mémoire (quelques mégaoctets) dont la taille est fixée par Oracle lors de la compilation du logiciel et ne peut pas être modifiée par le DBA.
+
+* Son rôle : Elle fait office de tableau de bord pour l'instance. Elle contient les variables internes, les pointeurs généraux et les adresses qui permettent à l'instance de savoir où se trouvent les autres composants de la SGA.
+* L'analogie : C'est le plan d'architecte placé à l'entrée du bâtiment.
+
+------------------------------
+## 3. Les Pools Secondaires (Les Spécialistes)
+Ces pools répondent à des besoins techniques ou applicatifs spécifiques :
+
+* Le Java Pool : Dédié à l'exécution de toutes les commandes, procédures stockées ou applications codées en Java à l'intérieur de la base de données.
+* Le Streams Pool : Utilisé spécifiquement par les outils de réplication de données d'Oracle (Oracle Streams ou GoldenGate) pour stocker les informations à transférer d'une base à une autre.
+* Les Buffers de taille non standard (Non-standard Block Size Buffers) : Par défaut, une base utilise une taille de bloc (ex: 8 Ko). Si vous importez des tablespaces configurés avec des blocs de 4 Ko, 16 Ko ou 32 Ko, le système crée des espaces tampons distincts dans la SGA spécialement dimensionnés pour ces blocs.
+
+
+
+
+
+
+   
+   
+   
+   
+   
+   
+   
+   15. Buffer Cache : blocs en RAM ; propre / sale / CR ;
+       éviction par touch count et point médian.
+       
+       Le Database Buffer Cache est la zone de la SGA qui conserve en RAM des copies des blocs de données provenant des fichiers sur disque (Datafiles). Son but est de réduire au maximum les accès disques (I/O) en fournissant les données directement depuis la mémoire.
+Pour gérer efficacement des millions de blocs en RAM, Oracle classe les blocs par état et utilise un algorithme d'éviction très sophistiqué.
+------------------------------
+## 1. Les 3 États d'un Bloc en RAM
+À un instant t, un bloc présent dans le Buffer Cache se trouve obligatoirement dans l'un de ces trois états :
+
+* Le Bloc Propre (Clean Buffer) : C'est un bloc qui est identique à sa version sur le disque. Il a été lu depuis le disque ou a déjà été écrit par DBWn. Comme il n'a subi aucune modification récente non sauvegardée, la MMU/le système peut immédiatement l'écraser (le réallouer) si le cache manque de place.
+* Le Bloc Sale (Dirty Buffer) : C'est un bloc dont les données ont été modifiées en RAM par une transaction (INSERT, UPDATE), mais qui n'a pas encore été écrit sur le disque par le processus DBWn. Ce bloc ne peut absolument pas être écrasé par un autre processus tant que DBWn ne l'a pas sécurisé dans les Datafiles.
+* Le Bloc CR (Consistent Read Buffer) : C'est une copie fantôme d'un bloc. Si un utilisateur A modifie une ligne (le bloc devient sale) mais ne fait pas de COMMIT, et qu'un utilisateur B lance une requête de lecture sur cette même ligne, l'utilisateur B doit voir les anciennes données. Oracle crée alors en RAM un bloc "CR" en combinant le bloc actuel et les informations d'annulation (Undo) pour garantir l'isolation de la transaction.
+
+------------------------------
+## 2. L'Algorithme d'Éviction : Point Médian et Touch Count
+Le Buffer Cache a une taille limitée (fixée par SGA_TARGET). Quand il est plein et qu'un processus doit y charger un nouveau bloc depuis le disque, il doit en éliminer un ancien (le remplacer).
+Pour ne pas supprimer des blocs fréquemment utilisés, Oracle utilise une version améliorée du principe LRU (Least Recently Used), basée sur un Point Médian (Midpoint) et un Compteur de Touches (Touch Count).
+## La structure de la liste : Le Point Médian
+Au lieu d'avoir une simple file d'attente, la liste des blocs en mémoire est séparée en deux compartiments distincts au niveau d'un Point Médian :
+
+  [ Tête de Liste ] ◄─────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────┐  │
+│                   COMPARTIMENT CHAUD (Hot)                   │  │
+│  Contient les blocs fréquemment accédés (Touch Count élevé) │  │
+└──────────────────────────────┬───────────────────────────────┘  │ (Un bloc froid
+                               │                                  │  très demandé
+                         [Point Médian]                           │  devient chaud)
+                               │                                  │
+┌──────────────────────────────▼───────────────────────────────┘  │
+│                   COMPARTIMENT FROID (Cold)                  │  │
+│  Contient les blocs récents ou peu utilisés                  │  │
+└──────────────────────────────┬───────────────────────────────┘
+                               │
+                               ▼ 
+                        [ Queue de Liste ] ──► [ ÉVICTION ] (Blocs propres exclus)
+
+
+* Le compartiment chaud (Hot Section) : Il représente environ 50% de la liste (au sommet). Il contient les blocs les plus populaires.
+* Le compartiment froid (Cold Section) : Il représente le reste de la liste (vers le bas). C'est là que sont injectés les nouveaux blocs lus sur le disque.
+
+## Le mécanisme du Touch Count (Compteur d'accès)
+Chaque bloc dans le cache possède un compteur dans son en-tête (le Touch Count). À chaque fois qu'une requête accède au bloc, le processeur incrémente ce compteur (avec une protection temporelle pour éviter qu'un utilisateur qui lit 50 fois la même ligne en une milliseconde ne fausse les statistiques).
+
+   1. L'arrivée : Un nouveau bloc lu sur le disque entre directement juste en dessous du Point Médian, dans la section froide, avec un Touch Count initialisé à 1.
+   2. La promotion : Si le bloc reste dans la section froide mais que son Touch Count augmente (parce que d'autres requêtes le demandent), il est propulsé au sommet de la section chaude.
+   3. L'éviction : Lorsqu'il faut faire de la place, la MMU/le processus cherche un bloc disponible en partant de la Queue de Liste (le bas de la section froide). Il examine le bloc :
+   * Si le bloc est sale, il demande à DBWn de s'en occuper et passe au suivant.
+      * Si le bloc est propre et que son Touch Count est bas (0 ou 1), il est immédiatement évincé (effacé de la RAM) pour laisser sa place au nouveau bloc.
+   
+Ce système à deux vitesses évite le phénomène de "pollution du cache", où un balayage complet d'une table gigantesque (Full Table Scan) chasserait instantanément tous les blocs importants de la mémoire. Avec le point médian, le balayage ne pollue que la section froide.
+
+
+
+       
+       
+       
+       
+       
+       
+   16. Shared Pool : Library Cache (plans) + Row Cache (dictionnaire).
+   Le Shared Pool est le deuxième composant majeur de la SGA. Alors que le Buffer Cache stocke des données brutes, le Shared Pool est le "cerveau" logiciel de l'instance : il est dédié au stockage du code SQL, des plans d'exécution et des métadonnées du système.
+Sa structure se divise principalement en deux zones de cache interconnectées : le Library Cache et le Row Cache (aussi appelé Data Dictionary Cache).
+------------------------------
+## 1. Le Library Cache (Le cache de code et de plans)
+Le Library Cache a pour but d'éviter au processeur de refaire les étapes lourdes d'analyse (Parsing) d'une requête SQL. Lorsqu'une application envoie une requête SQL à la base de données, l'ALU et le processeur serveur effectuent deux opérations :
+
+   1. L'analyse syntaxique et sémantique : Vérifier que la commande est correcte et que l'utilisateur a les droits requis.
+   2. L'optimisation : Calculer le chemin le plus rapide pour accéder aux données (par quel index passer, quelle table lire en premier). Le résultat de ce calcul est appelé le Plan d'exécution.
+
+## Le fonctionnement en RAM
+Toutes ces informations sont stockées dans le Library Cache sous forme de Shared SQL Areas.
+
+* Hard Parse (Analyse lourde) : Si la requête SQL n'est pas présente dans le Library Cache, le processeur doit tout calculer à partir de zéro. Cela consomme beaucoup de CPU.
+* Soft Parse (Analyse légère) : Si une requête rigoureusement identique arrive, le système la trouve immédiatement dans le Library Cache. Il saute l'étape d'optimisation et réutilise directement le plan d'exécution existant. L'accès est quasi instantané.
+
+------------------------------
+## 2. Le Row Cache / Data Dictionary Cache (Le cache des structures)
+Pour que le Library Cache puisse vérifier si une requête est valide (par exemple, si la table CLIENTS existe ou si la colonne TELEPHONE est bien un texte), il doit consulter le Dictionnaire de données.
+Le Dictionnaire de données est stocké physiquement sur le disque dans les tables système. Aller chercher ces définitions sur disque à chaque requête SQL rendrait l'ordinateur extrêmement lent.
+
+* Le rôle du Row Cache : Cette zone de la SGA stocke en mémoire les informations sur la structure même de la base de données. On l'appelle Row Cache (cache de lignes) car contrairement au Buffer Cache qui stocke des blocs entiers de 8 Ko, le Row Cache stocke directement les lignes de données du dictionnaire (des enregistrements précis).
+* Ce qu'il contient : Les définitions des tables, les types des colonnes, les index disponibles, les profils de sécurité des utilisateurs et les privilèges d'accès.
+
+------------------------------
+## 3. L'interaction entre les deux caches
+Ces deux composants fonctionnent en équipe à chaque fois qu'une commande SQL est soumise :
+
+               [ Requête SQL reçue par le Serveur ]
+                                │
+                                ▼
+ ┌─────────────────────────────────────────────────────────────┐
+ │ SHARED POOL                                                 │
+ │                                                             │
+ │  ┌───────────────────────┐       ┌───────────────────────┐  │
+ │  │     LIBRARY CACHE     │ ◄───► │       ROW CACHE       │  │
+ │  │                       │       │                       │  │
+ │  │ Stocke et cherche le  │       │ Fournit les schémas,  │  │
+ │  │ plan d'exécution SQL  │       │ les droits et tables  │  │
+ │  └───────────┬───────────┘       └───────────────────────┘  │
+ └──────────────┼──────────────────────────────────────────────┘
+                ▼
+     [ Exécution immédiate ]
+
+
+   1. La requête arrive dans le Library Cache.
+   2. Si elle doit être analysée (Parse), le Library Cache interroge le Row Cache en RAM pour obtenir instantanément les structures des tables et les droits de l'utilisateur.
+   3. Une fois les vérifications faites, le plan est créé, stocké dans le Library Cache pour les suivants, et la requête passe à l'étape d'exécution.
+
+
+
+
+   
+   
+   
+   17. Library Cache : hard parse (ms) vs soft parse vs session cursor cache.
+       Un parent, N enfants ; les binds évitent les doublons.
+       
+       To optimize application performance, the Library Cache bypasses expensive CPU parsing operations by reusing previously calculated execution plans. It uses a rigid Parent/Child hierarchy to index these plans.
+The choice between a Hard Parse, a Soft Parse, and a Session Cursor Cache hit determines whether your database query takes milliseconds or microseconds to execute.
+------------------------------
+## 1. Parent Cursor vs Child Cursor: The Hierarchy
+The Library Cache stores queries using a structural hierarchy designed to separate the text of a query from its execution context:
+
+* The Parent Cursor (1 per unique text string): Contains the exact literal text of the SQL statement and its cryptographic hash value.
+* The Child Cursors (N per Parent): Contain the actual execution plan (calculated by the optimizer) and the execution environment.
+
+## Why can a parent have multiple children?
+If two different users execute the exact same query text (SELECT * FROM employees), they share the same Parent. However, if User A has a custom optimization schema or if their table employees belongs to a different database schema than User B, the CPU must generate two separate execution plans. This creates two Child Cursors under the same Parent.
+------------------------------
+## 2. Hard Parse, Soft Parse, and Session Cursor Cache
+When a client process sends a query, Oracle searches this parent/child structure. The performance cost depends on how deep the system has to look:
+## Hard Parse (The Expensive Way) — Cost: Milliseconds (ms)
+
+* What happens: The query text is completely new; it does not match any existing Parent Cursor.
+* CPU Workload: The processor must perform syntactic checks, query the Row Cache to verify tables/permissions, allocate memory in the Shared Pool, and run the cost-based optimizer to generate a new execution plan from scratch.
+* Impact: Highly CPU-intensive. If an application forces thousands of hard parses per second, the Shared Pool latches lock up, causing severe performance degradation.
+
+## Soft Parse (The Efficient Way) — Cost: Microseconds ($\mu$s)
+
+* What happens: The query text already exists in the Library Cache. The CPU finds the Parent Cursor and identifies a valid Child Cursor that matches the current environment.
+* CPU Workload: The processor skips the optimization phase entirely. It simply verifies permissions and reuses the existing child execution plan.
+
+## Session Cursor Cache (The Fastest Way) — Cost: Near-Zero
+
+* What happens: Even a soft parse requires searching through the Library Cache hash chains, which consumes minor CPU latches. To bypass this, the private memory of the process (PGA) maintains a shortcut list called the Session Cursor Cache.
+* CPU Workload: If a specific session executes the same query more than 3 times, the pointer to the Library Cache child cursor is cached directly inside the user's private session memory. The MMU/CPU uses this pointer to jump instantly to the execution plan, completely skipping the Library Cache search.
+
+------------------------------
+## 3. How Bind Variables Prevent Duplicates
+Without bind variables, an application generates unique SQL text strings for every distinct input value:
+
+-- NO BIND VARIABLES (Creates 3 separate PARENT Cursors -> 3 Hard Parses)SELECT * FROM users WHERE id = 101;SELECT * FROM users WHERE id = 102;SELECT * FROM users WHERE id = 103;
+
+Because the literal text differs, the database views these as completely unrelated applications. The Library Cache floods with millions of single-use parent cursors, flushing out valuable older plans.
+By implementing Bind Variables, you replace literals with a placeholder (:id or ? depending on the programming language):
+
+-- WITH BIND VARIABLES (Creates 1 PARENT Cursor -> 1 Hard Parse, then N Soft Parses)SELECT * FROM users WHERE id = :id;
+
+## The result:
+Every subsequent execution uses the exact same parent cursor text string. The database executes a single Hard Parse the very first time the query runs. Every subsequent user request with a different ID executes a lightning-fast Soft Parse or triggers a Session Cursor Cache hit, saving massive amounts of RAM and CPU cycles.
+
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+   18. Redo Log Buffer : journal circulaire ; LGWR le vide au COMMIT.
+   
+   The Redo Log Buffer is the third vital component of the SGA. It acts as an ultra-fast, temporary storage zone in RAM designed to catch transaction receipts before they are written to disk.
+Its operation relies on a circular mechanism [LGWR] and a strict synchronization rule enforced by the LGWR (Log Writer) process [LGWR].
+------------------------------
+## 1. What is a Circular Buffer?
+The Redo Log Buffer is structured as a continuous ring of memory [LGWR]. Unlike other caches that use complex replacement algorithms (like the Touch Count system in the Buffer Cache) [LGWR], the Redo Log Buffer fills up and empties sequentially [LGWR].
+
+               ──► [ Entry 1: UPDATE ] ──►
+             │                             │
+    [ Entry 4: INSERT ]           [ Entry 2: DELETE ]
+             ▲                             │
+             │                             ▼
+               ◄── [ Entry 3: COMMIT ] ──◄
+             
+   * LGWR continuously chases the tail of the buffer, 
+     flushing entries to disk and freeing up space ahead.
+
+
+* Sequential Writing: As user processes execute DML statements (INSERT, UPDATE, DELETE), they write tiny change vectors (the "redo entries") one after the other into this buffer [LGWR].
+* No Expirations: Data is never "evicted" or chosen for deletion. The pointer simply moves forward. Once the LGWR process writes a section of the buffer onto the physical disk, that section is marked as reusable [LGWR].
+
+------------------------------
+## 2. When does LGWR flush the Buffer to Disk?
+The LGWR process is highly optimized and aggressive. It does not wait for the Redo Log Buffer to fill up entirely before acting [LGWR]. It flushes the memory to the physical Redo Log Files on disk whenever any of the following triggers occur [LGWR]:
+
+   1. At COMMIT (The most critical trigger): The moment a user types COMMIT, the session hangs until LGWR successfully copies that specific transaction's redo entries onto the disk [LGWR]. Once it hits the disk, the transaction is legally "durable." [LGWR]
+   2. Every 3 seconds: If the database is completely idle, LGWR wakes up on a timer every 3 seconds to clear out whatever minor changes have accumulated in the buffer.
+   3. When 1/3 full: If user activity is extremely intense, LGWR wakes up as soon as the buffered data occupies one-third of the total buffer space to prevent memory saturation.
+   4. Before DBWn writes: Under the Write-Ahead Logging (WAL) protocol [LGWR], the DBWn process cannot write a "dirty" data block to disk until LGWR has first written the corresponding redo entry [LGWR]. If DBWn needs to write, it signals LGWR to clear the buffer first.
+
+------------------------------
+## 3. Why this architecture provides maximum performance
+Writing to database files (Datafiles) is slow because it requires random I/O—the head of the hard drive or the controller of the SSD must find exactly where a specific table row sits [LGWR].
+By using the Redo Log Buffer and LGWR:
+
+* The database only performs sequential I/O during a COMMIT [LGWR]. LGWR just appends data straight to the end of the active log file, which is incredibly fast [LGWR].
+* The system tricks the user into a near-instantaneous COMMIT confirmation, safe in the knowledge that even if a power outage occurs a millisecond later, the circular log on the disk holds the blueprint to reconstruct the change [LGWR].
+
+
+
+
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   19. Large Pool : gros tampons (shared server, parallèle, RMAN).
+   The Large Pool is an optional but highly critical component of the SGA (Shared Global Area) [LGWR]. It was specifically designed by Oracle to handle large, memory-intensive operations that would otherwise pollute and degrade the performance of the Shared Pool [LGWR].
+Unlike the Shared Pool, which uses complex algorithms to manage hundreds of thousands of tiny items (like SQL statements and metadata) [LGWR], the Large Pool allocates memory in large, sequential blocks and does not use an aging-out (LRU) mechanism.
+------------------------------
+## 1. Why do we need a Large Pool?
+Before the introduction of the Large Pool, heavy background operations had to request memory from the Shared Pool. Because these operations required huge chunks of contiguous RAM, they would force the Shared Pool to evict thousands of cached SQL execution plans to make room.
+This resulted in massive CPU spikes, frequent Hard Parses [LGWR], and the dreaded ORA-04031: unable to allocate... bytes of shared memory error. The Large Pool acts as a dedicated isolation zone to prevent this.
+------------------------------
+## 2. The 3 Primary Use Cases for the Large Pool
+The Large Pool is dynamically used by three specific features of the database architecture:
+## A. Shared Server Architecture (Multi-Threaded Server)
+As we discussed earlier, when the database runs in Shared Server mode, the user's session memory—the UGA (User Global Area)—cannot stay inside a single process's private PGA [LGWR]. It must be placed in the shared SGA [LGWR].
+
+* Without the Large Pool: The UGA is placed in the Shared Pool, constantly fragmenting it as users log in and out.
+* With the Large Pool: The UGA (containing session variables, sort contexts, and open cursors) is safely stored in the Large Pool [LGWR], keeping the Shared Pool clean and fast.
+
+## B. Parallel Execution (Parallel Query)
+When you run a massive query using the parallel feature (SELECT /*+ PARALLEL */), the coordinator process splits the task among multiple Parallel Execution Servers (background slave processes).
+
+* These processes must rapidly exchange huge sets of data rows with each other in memory.
+* The Large Pool provides the message buffers used as the high-speed transit highway for these parallel processes to communicate.
+
+## C. Oracle RMAN (Backup and Recovery)
+When RMAN (Recovery Manager) backs up or restores your database, it reads massive blocks of data from the disks and prepares them to be written to a backup destination or tape drive.
+
+* RMAN sets up large memory buffers (Disk/Tape I/O slaves buffers) to stream this data.
+* Storing these massive, temporary streaming buffers in the Large Pool ensures that your daily backups never slow down the operational SQL execution plans of your users.
+
+------------------------------
+## Summary of the SGA Pools
+
+| Pool Name | Primary Content | Allocation Style | Impact if Missing |
+|---|---|---|---|
+| Shared Pool [LGWR] | Tiny pieces of code, SQL text, plans, dictionary data [LGWR]. | Dynamic, highly fragmented [LGWR]. | Severe CPU usage due to Hard Parsing [LGWR]. |
+| Large Pool | Massive blocks for UGA, RMAN, and Parallel Queries. | Large, contiguous chunks [LGWR]. | Shared Pool fragmentation and ORA-04031 errors. |
+
+
+
+
+
+
+
+   20. Latch vs mutex : le prix du partage, 1 copie pour N sessions.
+   À retenir : la SGA économise RAM, CPU et I/O, mais impose des verrous.
+Sharing a single memory space (the SGA) among thousands of sessions is a major architectural advantage [LGWR]: it dramatically reduces RAM consumption, prevents duplicate CPU calculations, and avoids slow disk operations [LGWR]. However, this sharing comes at a price.
+When N sessions try to access a single copy of a data block or an SQL plan at the exact same millisecond, the database must prevent data corruption. To do this, it uses ultra-lightweight, internal serialization mechanisms: Latches and Mutexes.
+------------------------------
+## 1. Latches vs Mutexes: The High-Speed Security Guards
+Unlike heavy database row verrous (Locks/Enqueues) that protect data tables and can last for hours, latches and mutexes exist purely in the RAM of the SGA to protect internal C/C++ memory structures. They last for microseconds.
+## Latches (The Traditional Guard)
+A latch is a low-level, internal locking mechanism used to protect large groups of objects or structures in the SGA (such as a whole chain of blocks in the Buffer Cache) [LGWR].
+
+* How it works: When a process needs to modify a structure, it must acquire the latch. While it holds the latch, no other process can touch any of the objects protected by it.
+* The Cost: If multiple CPUs try to acquire the same latch, they will "spin" (actively consume CPU cycles looping) waiting for it to free up, which can cause spikes in CPU usage.
+
+## Mutexes (The Modern, Laser-Focused Alternative)
+A mutex (Mutual Exclusion object) is a much newer, smaller, and significantly faster mechanism introduced to replace latches for specific operations—especially inside the Library Cache [LGWR].
+
+* How it works: Instead of protecting a whole group of objects, a mutex is embedded directly into an individual object itself (like a single SQL Parent Cursor) [LGWR].
+* The Benefit: It allows for much higher concurrency. Instead of locking down an entire section of memory, a session only locks the exact specific object it is using. It uses fewer CPU instructions to acquire and release than a latch.
+
+------------------------------
+## 2. The Core Takeaway: The Price of Sharing
+The golden rule of database memory architecture can be summarized as follows:
+$$\text{SGA} = \text{Massive Savings in RAM, CPU, and I/O} \ \longrightarrow \ \text{Imposes Wait Events (Locks/Latches)}$$ 
+While this tradeoff is highly favorable, it creates specific bottlenecks when applications are poorly designed:
+
+* The RAM/CPU/IO Gain: Because there is 1 copy for N sessions in the SGA, a data block read by one user benefits everyone (No I/O) [LGWR], and an SQL statement compiled by one user is reused by everyone (No CPU Hard Parse) [LGWR].
+* The Wait Event Cost: If an application does not use Bind Variables, it forces thousands of sessions to constantly modify the Library Cache structure at the same time to inject new SQL text [LGWR]. This triggers intense Latch Contention or Mutex Clashes. The CPUs spend more time fighting over the keys to the memory structures than doing actual ALU math.
+
+
+
+
+
+
+
+4. LA PGA : LA MÉMOIRE PRIVÉE
+   21. Définition : une par processus, sans verrou ; coût linéaire en N.
+   This definition describes the exact opposite of the shared SGA: the PGA (Program Global Area) [LGWR].
+While the SGA requires complex synchronization tools like latches and mutexes to allow multiple sessions to touch a single copy of data, the PGA relies on complete isolation [LGWR].
+------------------------------
+## 1. What it Means: One per Process, No Locks Needed
+The phrase "Une par processus, sans verrou" (One per process, lock-free) highlights the fundamental architectural advantage of the PGA:
+
+* Strictly Private: Every single server process or background process running on the operating system gets its own isolated bucket of RAM—its own PGA [LGWR].
+* Zero Contention (Lock-Free): Because Process A cannot see, read, or write to the PGA of Process B, it never has to ask for permission [LGWR]. There are no latches, no mutexes, and no wait events inside the PGA. The CPU can execute ALU calculations, sort rows, or manage session variables at maximum physical speed without ever spinning or waiting on another user [LGWR].
+
+------------------------------
+## 2. The Architectural Catch: Linear RAM Cost (Coût linéaire en N)
+While being lock-free makes the PGA incredibly fast, it introduces a major hardware constraint: the memory cost scales linearly ($O(N)$) with the number of concurrent connections ($N$).
+
+[ 1 Client Connection ]   ──►  1 Dedicated Process  ──►  1 PGA (ex: 20 MB)  = Total: 20 MB
+[ 10 Client Connections ] ──► 10 Dedicated Processes ──► 10 PGAs (ex: 20 MB)  = Total: 200 MB
+[ 1000 Client Connections ] ──► 1000 Dedicated Processes ──► 1000 PGAs (ex: 20 MB) = Total: 20 GB !
+
+
+* The SGA is Static: Whether you have 1 user or 10,000 users connected, the SGA is allocated at STARTUP and its size remains fixed (e.g., 32 GB) [LGWR].
+* The PGA is Dynamic and Cumulative: Every new connection in a Dedicated Server environment spawns a new process and requests a brand new allocation of private RAM from the host operating system [LGWR]. If your average PGA size per session is 20 MB, 1,000 active users will automatically consume 20 GB of raw RAM, completely independent of whatever size you allocated to your SGA.
+
+------------------------------
+## 3. Dedicated Server vs. The Linear Threat
+This linear cost is the exact reason why databases cannot scale infinitely on dedicated server models [LGWR]. If a sudden spike of 5,000 users hits the database, the memory consumption of the cumulative PGAs can easily exceed the physical RAM of the host machine, forcing the operating system to start Swapping memory blocks onto the slow hard drive—or triggering the Linux Out-Of-Memory (OOM) Killer to abruptly crash the instance.
+To manage this linear cost, modern DBAs use parameters like PGA_AGGREGATE_TARGET to instruct the instance to automatically shrink individual session sort areas when the total collective sum of all PGAs threatens to overwhelm the server's RAM.
+
+   
+   
+   
+   
+   
+   
+   22. Composants : Session Memory, Private SQL Area (Persistent + Runtime),
+       SQL Work Areas (Sort, Hash, Bitmap Merge).
+       The private memory of a process—the PGA (Program Global Area)—is divided into highly specialized functional zones [LGWR]. Unlike the shared pools of the SGA [LGWR], these components are entirely dedicated to managing a single user's session state, active cursor pointers, and heavy algebraic operations like sorting and hashing [LGWR].
+The PGA structure is broken down into three main layers: Session Memory, the Private SQL Area, and the SQL Work Areas.
+------------------------------
+## 1. Session Memory: The Identity Card
+This is the baseline memory allocated to track the user's connection profile and state.
+
+* What it stores: It holds session variables, user login privileges, active roles, and package variables (if using PL/SQL packages).
+* Location variation: If using a Dedicated Server, this memory stays inside the private PGA [LGWR]. If switching to a Shared Server, this specific layer migrates into the shared SGA (specifically the Large Pool) [LGWR].
+
+------------------------------
+## 2. Private SQL Area: The Cursor Blueprint
+Every time a session executes an SQL query, the process creates a Private SQL Area to link that specific session to the global execution plan stored in the SGA's Library Cache [LGWR]. It is split into two parts with different lifespans:
+
+* The Persistent Area (Static): This zone holds structural bind variable values [LGWR], data type definitions, and metadata about the query. It persists for the entire lifespan of the cursor (as long as the application keeps the statement open).
+* The Runtime Area (Dynamic): This zone holds the execution state information. It tracks exactly how many rows have been fetched so far and the current step of the execution plan. It is freed immediately as soon as the query finishes executing or the last row is fetched, even if the cursor remains open.
+
+------------------------------
+## 3. SQL Work Areas: The Heavy Machinery
+This is the most volatile and resource-intensive part of the PGA. It is allocated dynamically whenever a query requires memory-intensive, low-level data manipulation.
+
+* Sort Area: Allocated when a query contains operations like ORDER BY, GROUP BY, or DISTINCT. The CPU sorts the incoming rows entirely within this private space to avoid disk access.
+* Hash Area: Used to execute a HASH JOIN. When joining two large tables, the process reads the smaller table, builds a high-speed lookup hash table inside this area, and then streams the second table against it for near-instant matching.
+* Bitmap Merge Area: Used exclusively when resolving queries that utilize bitmap indexes. It retrieves bitmap paths from multiple index scans and merges them in memory to resolve complex AND/OR conditions before fetching rows.
+
+------------------------------
+## Summary of PGA Memory Allocation
+
+┌────────────────────────────────────────────────────────┐
+│ PGA (Private Session Memory)                           │
+├────────────────────────────────────────────────────────┤
+│ 1. SESSION MEMORY (Logins, PL/SQL state, variables)     │
+├────────────────────────────────────────────────────────┤
+│ 2. PRIVATE SQL AREA                                    │
+│   ┌──────────────────────────────────────────────────┐ │
+│   │ Persistent Area (Bind values, data types)        │ │
+│   ├──────────────────────────────────────────────────┤ │
+│   │ Runtime Area (Row counts, execution state)       │ │
+│   └──────────────────────────────────────────────────┘ │
+├────────────────────────────────────────────────────────┤
+│ 3. SQL WORK AREAS                                      │
+│   ┌───────────────┐ ┌───────────────┐ ┌──────────────┐ │
+│   │   Sort Area   │ │   Hash Area   │ │ Bitmap Merge │ │
+│   └───────────────┘ └───────────────┘ └──────────────┘ │
+└────────────────────────────────────────────────────────┘
+
+If the data volume for a sort or hash operation exceeds the maximum size allowed for the SQL Work Areas, the process executes a One-Pass or Multi-Pass operation, meaning it freezes the memory allocation and forces the excess rows to spill over onto the physical disk inside the TEMP tablespace.
+
+
+
+
+       
+       
+       
+       
+   23. Work Areas : optimal (RAM) / one-pass / multi-pass (débordement sur temp).
+   When an execution plan requires data manipulation inside the SQL Work Areas (such as a Sort Area for an ORDER BY or a Hash Area for a HASH JOIN), Oracle must decide how to handle the data based on the memory size allowed by PGA_AGGREGATE_TARGET [LGWR].
+The database automatically categorizes the execution performance into one of three execution modes: Optimal, One-Pass, or Multi-Pass.
+------------------------------
+## 1. Optimal Mode (100% RAM) — Maximum Performance
+This is the ideal scenario for the CPU and the ALU.
+
+* What happens: The entire dataset required for the sort or hash operation is small enough to fit completely inside the allocated RAM of the SQL Work Area.
+* Disk I/O: Zero. All operations occur at nanosecond speeds inside the private memory of the process.
+* The Process: Rows are fetched, sorted or hashed completely in memory, and streamed directly back to the client application.
+
+------------------------------
+## 2. One-Pass Mode (RAM + 1 Disk Operation) — Controlled Spill
+When the dataset grows too large for the allocated Work Area, the process is forced to execute a spill to disk.
+
+* What happens: The dataset is too large to be processed all at once in RAM. Oracle reads a chunk of data, processes it in the Work Area, and writes the intermediate result (called a "run") out to the TEMP tablespace on the physical disk.
+* Disk I/O: Minimal. The data is written to disk once, and then read back once at the very end to merge the intermediate results and return the final dataset.
+* Performance: Slower than Optimal due to disk latency, but completely managed and optimized by the system to avoid locking up server memory.
+
+------------------------------
+## 3. Multi-Pass Mode (RAM + Multiple Disk Operations) — The Bottleneck
+This is the worst-case scenario for database performance, indicating a severe misconfiguration or an exceptionally massive query.
+
+* What happens: The dataset is so gargantuan that even the intermediate "runs" written to the disk cannot be merged using the available Work Area RAM.
+* Disk I/O: Extreme. The process must split the data into multiple tiers, repeatedly writing data blocks to the TEMP tablespace, reading them back, re-sorting parts of them, and writing them out to disk again in multiple successive cycles (passes).
+* Performance: Abysmal. The CPU spends almost all its time waiting for physical disk I/O, transforming a query that should take seconds into an operation that can last for hours.
+
+------------------------------
+## Summary of Work Area Execution
+The performance matrix behaves as follows:
+
+[ Dataset Size vs Allocated PGA Work Area ]
+       │
+       ├─► Fits in RAM ───────────────► OPTIMAL    (100% RAM, Fast)
+       ├─► Exceeds RAM slightly ──────► ONE-PASS   (Spills to TEMP once)
+       └─► Critically exceeds RAM ────► MULTI-PASS (Thrashing TEMP, Very Slow)
+
+| Execution Mode | Memory Used | TEMP Disk Usage | Performance Level |
+|---|---|---|---|
+| Optimal | 100% RAM | None | ⚡ Ultra Fast |
+| One-Pass | Max Allowed RAM | Single write/read cycle | 🐢 Acceptable / Delayed |
+| Multi-Pass | Max Allowed RAM | Heavy read/write looping | 🛑 Critically Slow |
+
+DBAs actively monitor the performance view V$SQL_WORKAREA_ACTIVE to detect operations currently running in One-Pass or Multi-Pass mode. If Multi-Pass executions are detected, it signals that PGA_AGGREGATE_TARGET must be increased or the underlying SQL query must be tuned to process fewer rows.
+
+
+
+
+
+   
+   
+   
+   
+   
+   24. Dédié vs shared server vs DRCP : où part l'UGA ?
+   The destination of the UGA (User Global Area)—which holds a user's session state, variables, and open cursor tracking—depends entirely on the connection model chosen [LGWR].
+Because the UGA must always be accessible by whatever process is running your SQL, changing the architecture forces the database to shift the UGA between private operating system memory (PGA) and shared instance memory (SGA) [LGWR].
+Here is exactly where the UGA goes in each of the three major connection models:
+------------------------------
+## 1. Dedicated Server: UGA inside the PGA
+As we established, this is the strict 1-to-1 relationship model [LGWR].
+
+* Where the UGA goes: Inside the private PGA of the dedicated server process [LGWR].
+* Why: Because that specific process belongs exclusively to that specific client connection for its entire lifespan [LGWR]. No other process ever needs to see that session data [LGWR].
+* Memory impact: Fast and lock-free, but RAM consumption grows linearly with the number of connected users [LGWR].
+
+## 2. Shared Server: UGA inside the SGA (Large Pool)
+This is the center-call/dispatcher model designed to handle high connection counts with few processes [LGWR].
+
+* Where the UGA goes: Inside the shared SGA, specifically isolated within the Large Pool [LGWR].
+* Why: Because any random Shared Server Process from the pool must be able to pick up your query from the request queue and execute it [LGWR]. To do that, the process needs to read your session identity, which it can only do if the UGA sits in the public pool (SGA) [LGWR].
+* Memory impact: Saves massive amounts of system RAM, but shifts session memory management overhead into the shared SGA [LGWR].
+
+## 3. DRCP (Database Resident Connection Pool): UGA inside the PGA (Pooled)
+DRCP is the most modern architecture (essential for stateless web languages like PHP, Python, or Node.js). It combines the performance of a Dedicated Server with the scaling power of a Shared Server by pooling actual dedicated server processes (Pooled Servers).
+
+* Where the UGA goes: Inside the PGA of the borrowed Pooled Server process.
+* Why: When a web request arrives, DRCP hands a complete, pre-spawned dedicated process to the client. For the duration of that fast request, it acts exactly like a Dedicated Server. When the request ends, the session is detached, the UGA is completely wiped out or recycled, and the process goes back to the pool.
+* Memory impact: Maximum scalability. Thousands of web connections share a tiny pool of processes, and memory remains isolated in private PGAs without clogging up the SGA [LGWR].
+
+------------------------------
+## Direct Comparison Table
+
+| Connection Model | Location of the UGA | Primary Memory Target | Best Used For |
+|---|---|---|---|
+| Dedicated Server | 🔒 PGA (Private OS Memory) [LGWR] | Local Process RAM [LGWR] | Long-running batch jobs, heavy reports, DBA tasks [LGWR]. |
+| Shared Server | 🌐 SGA (Shared Instance Memory) [LGWR] | Large Pool (Shared RAM) [LGWR] | Mid-tier legacy architectures with persistent but idle connections [LGWR]. |
+| DRCP | ⚡ PGA (Dynamically Borrowed) | Pooled Process RAM | Modern web apps, microservices, micro-transactions (stateless apps). |
+
+
+
+
+
+
+
+   
+   
+   25. Diagnostic : V$PGASTAT, V$SQL_WORKAREA_ACTIVE, V$SQL_WORKAREA_HISTOGRAM,
+       V$SGA_DYNAMIC_COMPONENTS.
+   À retenir : la PGA isole et va vite, mais coûte N fois la RAM.
+   To monitor, troubleshoot, and balance the memory tension between the shared SGA and the linear, private scaling of the PGA, Oracle provides a set of dynamic performance views (V$ views).
+Here is the technical diagnostic breakdown of these four essential views and how they help you manage the core rule: the PGA isolates data and runs lock-free, but its RAM cost multiplies linearly (O(N)) with every new connection.
+------------------------------
+## 1. The Diagnostic Tools (V$ Views)## A. V$PGASTAT: The Instance-Wide PGA Dashboard
+This view provides global, instance-level statistics about current PGA usage and the health of your memory allocations.
+
+* Key Metrics to Look For:
+* aggregate PGA target parameter: The current setting of your PGA_AGGREGATE_TARGET.
+   * total PGA allocated: The actual amount of physical RAM currently bound to all user PGAs combined.
+   * cache hit percentage: A vital metric. If it stays close to 100%, almost all your sort/hash work areas are executing in Optimal mode. If it drops significantly, your processes are thrashing the disk.
+
+## B. V$SQL_WORKAREA_ACTIVE: Real-Time Heavy Operations
+This view shows you exactly what is running right now in memory that requires a Work Area (Sorts, Hashes, Bitmaps).
+
+* Diagnostic Utility: If a user complains that a query is hanging, you check this view. It will reveal the exact SQL statement (SQL_ID), how much RAM it is actively consuming (ACTUAL_MEM_USED), and whether it has spilled over into the TEMP tablespace (TEMP_SPACE_ALLOCATED).
+
+## C. V$SQL_WORKAREA_HISTOGRAM: Historical Sizing Health
+Instead of real-time queries, this view provides a historical histogram of how work areas have behaved since the database instance was started.
+
+* Diagnostic Utility: It breaks down executions into size buckets (e.g., 2 MB, 4 MB, 64 MB) and counts how many times queries in those buckets executed in Optimal, One-Pass, or Multi-Pass mode. If you see numbers accumulating in the Multi-Pass column for large buckets, it means your PGA_AGGREGATE_TARGET is too restrictive for your workload.
+
+## D. V$SGA_DYNAMIC_COMPONENTS: Tracking ASMM Tuning
+Because SGA_TARGET automatically resizes the Buffer Cache, Shared Pool, and Large Pool in real time, you need a way to track those changes.
+
+* Diagnostic Utility: This view logs the current size, minimum size, maximum size, and the last time an automatic component resize occurred. If you see constant, aggressive resizing ("memory churning") between the Shared Pool and Buffer Cache, it signals that your overall SGA_TARGET is too small for the workload.
+
+------------------------------
+## 2. Core Architectural Takeaway
+
+  ┌────────────────────────────────────────────────────────┐
+  │                   THE MEMORY BALANCE                   │
+  ├───────────────────────────┬────────────────────────────┤
+  │       SHARED SGA          │         PRIVATE PGA        │
+  ├───────────────────────────┼────────────────────────────┤
+  │  • One copy for everyone  │  • One bucket per process  │
+  │  • Saves RAM and CPU      │  • Lock-Free & Ultra-Fast  │
+  │  • Imposes Latches/Mutexes│  • Costs N times the RAM   │
+  └───────────────────────────┴────────────────────────────┘
+
+The fundamental design tension in database memory architecture always returns to this:
+
+* The SGA economizes resources but introduces contention. It forces sessions to synchronize via latches/mutexes to read a single block of RAM.
+* The PGA optimizes speed but destroys scalability. It gives every process its own isolated workspace, meaning it executes calculations at hardware speeds without ever locking. However, because it cannot share, its memory footprint scales linearly. 100 dedicated sessions might take 2 GB of RAM, but 10,000 dedicated sessions will demand 200 GB of raw RAM just for their private PGAs.
+
+
+
+
+
+   
+   
+   
+   
+   
+   
+   
+   
+   
+
+5. LIEN ENTRE LES DEUX MÉMOIRES 
+
+   26. Shared SQL Area (SGA : texte, plan) vs Private SQL Area (PGA : binds, avancement).
+   Ce point marque la jonction parfaite entre la SGA (l'espace public partagé) et la PGA (l'espace privé de chaque processus) [LGWR]. C’est ici que l’on comprend concrètement comment la base de données exécute une requête SQL pour un utilisateur sans dupliquer le travail des autres.
+Pour exécuter une seule et même requête, Oracle sépare le travail en deux composants complémentaires : la Shared SQL Area et la Private SQL Area.
+------------------------------
+## 1. L'Anatomie du lien : Public vs Privé
+Lorsqu'un processus serveur doit exécuter une requête SQL pour un client, il crée un pont invisible entre sa loge privée et la scène commune :
+
+┌────────────────────────────────────────────────────────┐
+│ PGA PRIVÉE DU PROCESSUS (1 par session)                │
+│                                                        │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ PRIVATE SQL AREA                                 │  │
+│  │  • Valeur des variables liées (ex: :id = 101)   │  │
+│  │  • État d'avancement (ex: "lu 42 lignes sur 100")│  │
+│  └────────────────────────┬─────────────────────────┘  │
+└───────────────────────────┼────────────────────────────┘
+                            │ (Pointe vers...)
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│ SGA PARTAGÉE (1 pour toute l'instance)                 │
+│                                                        │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ SHARED POOL -> LIBRARY CACHE                     │  │
+│  │  ┌────────────────────────────────────────────┐  │  │
+│  │  │ SHARED SQL AREA                            │  │  │
+│  │  │  • Texte exact de la requête SQL           │  │  │
+│  │  │  • Plan d'exécution calculé par l'optimiseur│  │  │
+│  │  └────────────────────────────────────────────┘  │  │
+│  └──────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────┘
+
+## A. La Shared SQL Area (Dans la SGA : Ce qui est universel)
+Située au cœur du Library Cache dans le Shared Pool, cette zone contient les éléments immuables de la requête, qui sont identiques pour tous les utilisateurs [LGWR].
+
+* Le Texte SQL : La chaîne de caractères brute de la requête (par exemple : SELECT * FROM employes WHERE id_dept = :id).
+* Le Plan d'exécution : La recette mathématique calculée par le processeur pour savoir comment aller chercher les données (par quel index passer, dans quel ordre lier les tables).
+* Le gain : Elle est unique. Si 500 utilisateurs exécutent la même requête, il n'y a qu'une seule Shared SQL Area en RAM, économisant du CPU (pas de Hard Parse) et de la mémoire [LGWR].
+
+## B. La Private SQL Area (Dans la PGA : Ce qui est personnel)
+Située dans la mémoire privée du processus utilisateur (PGA), cette zone contient les données dynamiques et spécifiques à votre exécution en ce moment précis [LGWR].
+
+* Les Bind Variables (Variables liées) : C'est ici que l'ordinateur stocke que, pour votre session, :id est égal à 101 (pendant qu'un autre utilisateur aura stocké 202 dans sa propre PGA).
+* L'état d'avancement (Runtime State) : Cette zone contient les pointeurs de curseur qui indiquent où en est l'ALU dans l'extraction des données. Elle mémorise par exemple : "Le client a demandé les lignes par paquets de 10, j'ai renvoyé les 10 premières, je suis arrêté à la ligne 11".
+* L'avantage : Comme elle est dans la PGA, elle est accessible sans aucun verrou (pas de latch ni de mutex), garantissant une exécution ultra-rapide [LGWR].
+
+------------------------------
+## 2. Pourquoi cette séparation est-elle géniale ?
+Imaginons une application bancaire où 1 000 guichetiers consultent des soldes de comptes en même temps.
+
+   1. Grâce à la SGA : Le code de l'application et la logique de recherche du compte ne sont analysés et stockés qu'une seule fois dans la Shared SQL Area. L'ordinateur ne réinvente pas la roue 1 000 fois.
+   2. Grâce à la PGA : Chaque guichetier peut interroger un numéro de compte différent (Bind) et faire défiler ses résultats à son propre rythme (Avancement) dans sa Private SQL Area, dans une isolation totale et sans jamais ralentir les 999 autres collègues.
+
+
+
+
+
+   
+   
+   
+   
+   
+   
+   
+   27. Le curseur : le pont qui relie 1 Shared à N Private.
+   Le curseur est le concept ultime qui matérialise l'alliance entre la SGA et la PGA. Techniquement, un curseur n'est rien d'autre qu'un pointeur nommé ou une poignée (handle) qui relie la session privée d'un utilisateur à la structure de données globale en mémoire [LGWR].
+C'est précisément le pont qui permet à une seule et unique copie d'une requête SQL (Shared Area) de servir simultanément à N processus indépendants (Private Areas) [LGWR].
+------------------------------
+## 1. L'Architecture du Pont : 1 Shared $\longleftrightarrow$ N Private
+Pour bien visualiser ce mécanisme, imaginez le curseur comme une fiche de lecture personnalisée :
+
+  SESSION A (PGA de l'utilisateur 1)       SESSION B (PGA de l'utilisateur 2)
+ ┌──────────────────────────────────┐     ┌──────────────────────────────────┐
+ │  Curseur Ouvert (Poignée #12)    │     │  Curseur Ouvert (Poignée #99)    │
+ │  ┌────────────────────────────┐  │     │  ┌────────────────────────────┐  │
+ │  │     PRIVATE SQL AREA       │  │     │  │     PRIVATE SQL AREA       │  │
+ │  │  • Valeur : :id = 45       │  │     │  │  • Valeur : :id = 89       │  │
+ │  │  • Ligne courante : 15     │  │     │  │  • Ligne courante : 740    │  │
+ └──┴──────────────┬─────────────┴──┘     └──┴──────────────┬─────────────┴──┘
+                   │                                        │
+                   └───────────────┐        ┌───────────────┘
+                                   ▼        ▼
+                           ┌────────────────────────┐
+                           │      LE CURSEUR        │  ◄── Le Pont invisible
+                           └──────────┬─────────────┘
+                                      │
+                                      ▼
+                        ┌──────────────────────────┐
+                        │    SHARED SQL AREA       │ (Dans la SGA : 
+                        │   (Shared Pool / LC)     │  Library Cache)
+                        │ • Texte : WHERE id = :id │
+                        │ • Plan d'exécution global│ [LGWR]
+                        └──────────────────────────┘
+
+## Du côté de la PGA (Les Extrémités Privées)
+Chaque processus utilisateur ouvre un curseur dans sa PGA. Dans cet espace privé, le système crée une structure qui suit uniquement son travail [LGWR] :
+
+* Le curseur sait quelles données spécifiques l'utilisateur a injectées (les Binds) [LGWR].
+* Le curseur contient l'offset (la ligne courante), c'est-à-dire l'endroit exact où le pointeur de lecture s'est arrêté dans la table.
+
+## Du côté de la SGA (La Base Commune)
+Le curseur traverse la mémoire pour aller s'ancrer dans le Library Cache de la SGA. Il s'attache à la Shared SQL Area correspondante [LGWR]. Grâce à ce point d'ancrage, le processus serveur dédié sait exactement quel code exécuter et quel plan suivre sans avoir à relire le disque ou à relancer l'optimiseur [LGWR].
+------------------------------
+## 2. Le Cycle de Vie d'un Curseur
+Pour qu'un processus puisse extraire des données, le curseur passe par quatre étapes logiques gérées par l'ALU et la mémoire :
+
+   1. OPEN (Ouverture) : Le processus serveur alloue l'espace pour la Private SQL Area dans la PGA de l'utilisateur [LGWR]. Le pointeur est créé, prêt à l'emploi.
+   2. PARSE (Analyse) : Le curseur jette son pont vers la SGA. La MMU cherche si la requête existe déjà dans le Library Cache. Si oui (Soft Parse), le curseur se lie à la Shared SQL Area existante [LGWR]. Si non (Hard Parse), elle est créée [LGWR].
+   3. EXECUTE (Exécution) : L'ALU se met au travail. La requête est lancée en utilisant les variables liées stockées dans la PGA et le plan d'exécution stocké dans la SGA [LGWR].
+   4. FETCH (Extraction) : L'utilisateur demande les lignes de données. À chaque paquet de lignes renvoyé, le curseur met à jour son état d'avancement interne dans la PGA (ex: "Ligne 1 à 100 envoyées"). Tant que le client demande des lignes, le curseur reste ouvert et actif.
+   5. CLOSE (Fermeture) : Une fois le travail terminé, la Runtime Area de la PGA est libérée, le pont est coupé, mais la structure Shared reste dans la SGA au cas où un autre utilisateur en aurait besoin [LGWR].
+
+------------------------------
+## 3. Le Résumé Ultime de l'Architecture Mémoire
+Voici la synthèse parfaite de toutes les notions que nous avons étudiées jusqu'ici :
+
+* La SGA permet d'avoir 1 seule copie globale des données (Buffer Cache) et du code (Shared Pool) [LGWR]. Elle économise la RAM, le CPU et les I/O, au prix d'une synchronisation par latches et mutexes [LGWR].
+* La PGA offre N espaces isolés pour chaque processus [LGWR]. Elle élimine les verrous et maximise la vitesse de calcul, mais coûte N fois plus de RAM au système [LGWR].
+* Le Curseur est le mécanisme de liaison qui unifie ces deux mondes, permettant à l'isolation privée (PGA) de s'appuyer sur la mutualisation publique (SGA) [LGWR].
+
+
+
+
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   28. Tableau comparatif SGA vs PGA : 11 critères
+       (portée, nombre, verrous, coût, contenu, paramètres, symptômes...).
+       Pour clore magnifiquement cette étude de l'architecture mémoire d'une base de données, voici le tableau comparatif ultime structurant la SGA et la PGA à travers les 11 critères fondamentaux.
+## Tableau Comparatif : SGA vs PGA
+
+| N° | Critère | SGA (Shared Global Area) | PGA (Program Global Area) |
+|---|---|---|---|
+| 1 | Portée (Scope) | Globale et partagée par tous les processus de l'instance [LGWR]. | Privée et isolée ; propre à un seul processus [LGWR]. |
+| 2 | Nombre dans l'instance | Unique (1 seule SGA) par instance de base de données [LGWR]. | Multiple (N PGA) ; autant que de processus actifs [LGWR]. |
+| 3 | Mécanismes de verrouillage | Obligatoires (gérés par des Latches et Mutexes) pour éviter la corruption de la structure commune [LGWR]. | Aucun (Lock-Free) ; le processus est seul maître chez lui, garantissant une vitesse maximale [LGWR]. |
+| 4 | Évolution du coût matériel | Fixe et prédictible ; allouée une bonne fois pour toutes au démarrage [LGWR]. | Linéaire (O(N)) ; consomme de la RAM supplémentaire à chaque nouvelle connexion [LGWR]. |
+| 5 | Moment d'allocation | Au STARTUP de l'instance (dès l'étape NOMOUNT). | À la création du processus système (connexion du client) [LGWR]. |
+| 6 | Volatilité / Persistance | Disparaît dès que l'instance s'arrête (SHUTDOWN) ou si le serveur subit une panne électrique. | Libérée immédiatement dès que le processus client se déconnecte ou plante [LGWR]. |
+| 7 | Contenu Principal | Blocs de données (Buffer Cache), plans d'exécution et code SQL (Shared Pool), tampons de logs (Log Buffer) [LGWR]. | Données de session (Session Memory), variables liées (Binds), zones de calculs (Sort / Hash Area) [LGWR]. |
+| 8 | Paramètres clés (Oracle) | SGA_TARGET (pour l'ASMM), SGA_MAX_SIZE. | PGA_AGGREGATE_TARGET (gestion dynamique globale), PGA_AGGREGATE_LIMIT. |
+| 9 | Vues de Diagnostic (V$) | V$SGA, V$SGASTAT, V$SGA_DYNAMIC_COMPONENTS. | V$PGASTAT, V$PROCESS_MEMORY, V$SQL_WORKAREA_ACTIVE. |
+| 10 | Symptômes de sous-dimensionnement | Explosions des Hard Parses (CPU saturé) [LGWR], I/O disques massifs sur les Datafiles, attentes sur latches/mutexes [LGWR]. | Débordements massifs sur le disque (TEMP Tablespace), exécutions en Multi-Pass, ou crashs système par manque de RAM. |
+| 11 | Technique d'optimisation OS | Utilisation des HugePages (Linux) pour réduire la taille de la table des pages du processeur. | Utilisation de pools de connexions (DRCP / architectures Web) pour casser la croissance linéaire de la RAM [LGWR]. |
+
+------------------------------
+## La synthèse architecturale à retenir
+Ce tableau met en lumière l'équilibre parfait du système :
+
+* La SGA centralise l'intelligence et le patrimoine de données de la base. Elle évite au serveur de refaire indéfiniment les mêmes calculs ou les mêmes lectures de fichiers [LGWR].
+* La PGA fournit la puissance brute d'exécution. Elle donne à chaque travailleur la liberté de trier, de filtrer et de gérer ses variables à la vitesse de la mémoire vive, sans jamais subir la contention des autres utilisateurs [LGWR].
+* Le Curseur sert de passerelle logique, permettant à chaque structure privée de la PGA de venir s'alimenter en toute sécurité dans le grand bain de la SGA [LGWR].
+
+
+
+
+
+
+       
+       
+       
+       
+       
+       
+   29. RAC et Multitenant : une phrase chacun pour situer.
+   À retenir : partager (SGA) contre isoler (PGA) ; on dimensionne séparément.
+   Pour situer ces deux architectures majeures d'Oracle dans le cadre de notre étude de la mémoire :
+
+* RAC (Real Application Clusters) : C'est une architecture où plusieurs instances distinctes (chacune avec sa propre SGA/PGA) tournent sur des serveurs différents mais partagent et synchronisent leurs données en RAM via une interconnexion réseau ultra-rapide (mécanisme de Cache Fusion).
+* Multitenant (CDB/PDB) : C'est une architecture de consolidation où une seule et unique instance globale (une seule SGA et un pool de processus) gère une base de données conteneur (CDB) qui héberge plusieurs bases de données enfichables (PDB) isolées logiquement les unes des autres.
+
+------------------------------
+## La Règle d'or Ultime : Partager contre Isoler
+S'il n'y avait qu'une seule conclusion à tirer de l'ensemble de notre parcours (du cycle CPU à la structure interne des pools), c'est celle-ci :
+
+       ┌────────────────────────────────────────────────────────┐
+       │                 LE DILEMME DE L'ARCHITECTURE          │
+       ├────────────────────────────────────────┬───────────────┤
+       │  PARTAGER (SGA)                        │ ISOLER (PGA)  │
+       ├────────────────────────────────────────┼───────────────┤
+       │  • Économise la RAM et le CPU          │ • Élimine les │
+       │  • Réduit les accès aux disques (I/O)  │   verrous     │
+       │  • IMPOSE des verrous (Latches/Mutexes)│ • Vitesse max │
+       │                                        │ • COÛTE N x   │
+       │                                        │   la RAM      │
+       └────────────────────────────────────────┴───────────────┘
+
+Comme ces deux philosophies s'opposent mais se complètent pour faire tourner l'ordinateur, on dimensionne toujours la SGA (SGA_TARGET) et la PGA (PGA_AGGREGATE_TARGET) séparément. La première doit être configurée en fonction de la taille de vos données chaudes et de votre code, tandis que la seconde doit être calibrée selon le comportement de vos requêtes (tris, jointures) et le nombre d'acteurs (processus) présents sur la scène.
+Félicitations pour avoir parcouru l'intégralité de ces 29 points d'architecture !
+
+
+
+
+   
+   
+   
+   
+   
+
+6. PARCOURS COMPLET (1:50)
+   Question : que se passe-t-il vraiment quand on lance la requête ?
+   30. SELECT en 6 étapes : envoi (PGA) -> parse (Shared Pool) -> bind (PGA)
+       -> execute (Buffer Cache) -> fetch (PGA) -> curseur gardé.
+       
+       Voici le parcours chronologique complet d'une requête SQL. Ce voyage d'une seconde et cinquante centièmes (1:50) montre comment l'ALU, la SGA, la PGA et le Curseur collaborent pour transformer une commande textuelle en un flux de données.
+------------------------------
+## Les 6 Étapes du Parcours Complet
+
+ [ Application Client ]
+          │
+          ▼  (1) ENVOI
+ ┌─────────────────────────────────────────────────────────────┐
+ │ PGA (Mémoire Privée Processus)                              │
+ │   • Reçoit la requête textuelle                             │
+ │   • Prépare l'espace du Curseur                             │
+ └────────┬────────────────────────────────────────────────────┘
+          │
+          ▼  (2) PARSE (Vers la SGA)
+ ┌─────────────────────────────────────────────────────────────┐
+ │ SGA -> SHARED POOL (Library Cache + Row Cache)              │
+ │   • Soft Parse : Plan d'exécution trouvé ! (Latches/Mutexes)│
+ └────────┬────────────────────────────────────────────────────┘
+          │
+          ▼  (3) BIND
+ ┌─────────────────────────────────────────────────────────────┐
+ │ PGA (Mémoire Privée Processus)                              │
+ │   • Injecte la valeur réelle (:id = 101) dans le curseur    │
+ └────────┬────────────────────────────────────────────────────┘
+          │
+          ▼  (4) EXECUTE (Vers la SGA)
+ ┌─────────────────────────────────────────────────────────────┐
+ │ SGA -> DATABASE BUFFER CACHE                                │
+ │   • L'ALU traite le plan : lecture des blocs en RAM         │
+ │   • Si absent : I/O Disque -> Chargement (Point Médian)     │
+ └────────┬────────────────────────────────────────────────────┘
+          │
+          ▼  (5) FETCH
+ ┌─────────────────────────────────────────────────────────────┐
+ │ PGA -> SQL WORK AREAS                                       │
+ │   • Tri/Filtrage (Optimal / One-Pass)                       │
+ │   • Renvoi des lignes par paquets au client                 │
+ └────────┬────────────────────────────────────────────────────┘
+          │
+          ▼  (6) CURSEUR GARDÉ
+ ┌─────────────────────────────────────────────────────────────┐
+ │ SESSION CURSOR CACHE                                        │
+ │   • La structure Runtime est libérée                        │
+ │   • Le pointeur reste en PGA pour la prochaine fois         │
+ └─────────────────────────────────────────────────────────────┘
+
+## Étape 1 : L'Envoi (PGA)
+L'application web transmet la chaîne de caractères SELECT * FROM clients WHERE id = :id. Le processus serveur dédié reçoit ce texte et l'accueille dans sa PGA. Il alloue immédiatement une structure privée : la Private SQL Area. Un curseur vide vient d'être initialisé.
+## Étape 2 : Le Parse (SGA - Shared Pool)
+Le processus jette un pont vers la SGA. Il interroge le Library Cache du Shared Pool en utilisant des verrous légers (Mutexes). Le système vérifie les droits et les tables via le Row Cache.
+
+* Scénario Idéal (Soft Parse) : La requête a déjà été jouée par un autre utilisateur. Le système associe instantanément le curseur privé à la Shared SQL Area globale contenant le plan d'exécution.
+
+## Étape 3 : Le Bind (PGA)
+Le processus revient dans sa PGA, en mode Lock-Free (sans verrou). Il prend la valeur fournie par l'utilisateur (par exemple, :id = 101) et l'injecte dans la zone persistante de sa Private SQL Area. La requête générique dispose désormais de ses données réelles d'exécution.
+## Étape 4 : L'Execute (SGA - Buffer Cache)
+L'ALU et le processus serveur exécutent la recette dictée par le plan. Ils se dirigent vers le Database Buffer Cache de la SGA pour lire les blocs de données contenant le client 101. Si les blocs sont présents, la lecture se fait à la vitesse de la RAM. S'ils sont absents, le système déclenche une I/O disque lente, charge le bloc en queue de liste (section froide) et incrémente son Touch Count.
+## Étape 5 : Le Fetch (PGA - Work Areas)
+Le processus extrait (Fetch) les lignes du Buffer Cache et les rapatrie dans la PGA de l'utilisateur. Si la requête exigeait un tri (ORDER BY), le processeur utilise l'SQL Work Area. Si l'espace est suffisant (Mode Optimal), le tri s'effectue à l'intérieur de la RAM. Les lignes sont ensuite formatées et renvoyées par paquets sur le réseau à l'application.
+## Étape 6 : Le Curseur Gardé (PGA)
+Une fois la dernière ligne transmise, l'exécution se termine. La zone temporaire de la PGA (Runtime Area) est immédiatement vidée. Cependant, le pointeur logique (le curseur) est conservé et mis de côté dans le Session Cursor Cache de la PGA. Si l'application renvoie la même requête quelques millisecondes plus tard, Oracle sautera la phase de recherche dans le Shared Pool pour réutiliser directement ce raccourci.
+------------------------------
+## L'Enchaînement Ultime du Partage et de l'Isolation
+Ce parcours de 1:50 résume parfaitement le fonctionnement d'un moteur de base de données : la requête navigue continuellement entre les autoroutes partagées de la SGA (pour mutualiser le code et les blocs de données) et les salons privés de la PGA (pour traiter les variables et trier les résultats à l'abri de la contention des autres utilisateurs).
+
+
+
+
+
+       
+       
+       
+       
+       
+   31. UPDATE et COMMIT : undo, bloc sale, redo, LGWR au COMMIT, DBWn plus tard
+       (write-ahead logging).
+   À retenir : toujours PGA -> SGA -> PGA ; tout hit en RAM évite le disque.
+
+
+The asynchronous journey of an UPDATE followed by a COMMIT demonstrates how the database guarantees absolute durability (ACID) at hardware speeds without being choked by slow disk operations.
+It is governed by the Write-Ahead Logging (WAL) protocol and follows a strict flow: PGA → SGA → PGA.
+------------------------------
+## 1. The Asynchronous Flow: Step-by-Step
+
+       [ User issues UPDATE & COMMIT ]
+                      │
+                      ▼
+ ┌────────────────────────────────────────────────────────┐
+ │ 1. PGA (Private Workspace)                             │
+ │    • Receives the statement and values.                │
+ └────────────────────┬───────────────────────────────────┘
+                      │ (Pointers navigate to SGA)
+                      ▼
+ ┌────────────────────────────────────────────────────────┐
+ │ 2. SGA (Shared Workspace)                              │
+ │                                                        │
+ │    • UNDO SEGMENT     ──► Keeps the "Before" image.    │
+ │    • BUFFER CACHE     ──► Modifies block ("Dirty").    │
+ │    • REDO LOG BUFFER  ──► Writes the change vector.    │
+ └────────────────────┬───────────────────────────────────┘
+                      │ (User types COMMIT)
+                      ▼
+ ┌────────────────────────────────────────────────────────┐
+ │ 3. LGWR PROCESS (Immediate Flush)                      │
+ │    • Flushes Redo Log Buffer ──► REDO LOG FILES (Disk) │
+ └────────────────────┬───────────────────────────────────┘
+                      │ (Acknowledged to User)
+                      ▼
+ ┌────────────────────────────────────────────────────────┐
+ │ 4. PGA (Return Signal)                                 │
+ │    • "Commit Complete" returned lock-free.             │
+ └────────────────────┬───────────────────────────────────┘
+                      │ (Minutes later, asynchronously)
+                      ▼
+ ┌────────────────────────────────────────────────────────┐
+ │ 5. DBWn PROCESS (Lazy Flush)                           │
+ │    • Flushes Dirty Blocks ──► DATAFILES (Disk)         │
+ └────────────────────────────────────────────────────────┘
+
+## Step 1: The Setup (PGA)
+The user process receives the update request (e.g., UPDATE accounts SET balance = 500 WHERE id = 10). The memory footprint begins in the private PGA, parsing the query and isolating the bind variables.
+## Step 2: The Ram Mutation (SGA)
+The process moves to the shared SGA to alter the data entirely in memory. No files on the disk are touched yet:
+
+* Undo Generation: The old value (e.g., balance = 400) is copied into an Undo block in the Buffer Cache. This ensures other users still see the old data until you commit.
+* The Dirty Block: The actual data block containing the account is modified in the Database Buffer Cache. Because its content is now different from the disk, it is flagged as a Dirty Block.
+* The Redo Entry: A tiny, sequential change vector ("Account 10 changed from 400 to 500") is appended to the Redo Log Buffer.
+
+## Step 3: The COMMIT and LGWR (Disk Boundary)
+The user sends a COMMIT command. This triggers the LGWR (Log Writer) process immediately. LGWR takes the sequential contents of the Redo Log Buffer and flushes them to the physical Redo Log Files on disk.
+## Step 4: Back to PGA
+The moment the hard drive controller confirms the tiny redo log entries are securely written to the disk, the session is released. The notification "Commit Complete" is flashed back to the user's PGA. The transaction is officially durable and irreversible.
+## Step 5: DBWn Later (Write-Ahead Logging)
+Notice that your actual tables in the Datafiles still contain the old data. The dirty block is sitting comfortably in the RAM of the Buffer Cache.
+Minutes later, or when memory runs low, the DBWn (Database Writer) process wakes up in the background and gracefully writes the dirty blocks into the Datafiles. Under the Write-Ahead Logging (WAL) rule, DBWn is legally forbidden from writing a dirty block to disk unless LGWR has already written its corresponding redo vector first.
+------------------------------
+## Core Architectural Takeaway
+Every data mutation cycles through a rigid path: PGA → SGA → PGA.
+By separating the fast, sequential logging of changes (LGWR) from the slow, random writing of large table blocks (DBWn), the database tricks the operating system into maximum throughput. Any hit in RAM completely avoids the disk, allowing the CPU to process billions of operations at memory speeds while deferring physical storage cleanup to a quiet background thread.
+
+
