@@ -422,27 +422,95 @@ En résumé, le serveur partagé fonctionne comme un centre d'appels : peu impor
 
 ### 10. Les 5 processus background : DBWn, LGWR, CKPT, SMON, PMON
 
-Ces cinq processus d'arrière-plan constituent le cœur de l'infrastructure logicielle d'une instance (comme Oracle). Ils s'exécutent en tâche de fond pour assurer la maintenance, la performance et la survie de la base.
-
-| Processus          | Nom complet     | Rôle principal                                                                                                                                                                                                 | Interaction avec la SGA (RAM)                                             | Interaction avec le disque                                                                                                                  |
-| ------------------ | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| DBWn (n = 1, 2...) | DataBase Writer | Écrit les blocs modifiés de la mémoire vers le disque, de manière asynchrone, pour libérer de la place en RAM.                                                                                             | Lit le Buffer Cache à la recherche de blocs « sales » (dirty buffers). | Écrit dans les Datafiles.                                                                                                                  |
-| LGWR               | Log Writer      | Écrit les journaux de transaction sur le disque dès un COMMIT pour garantir la durabilité.                                                                                                                   | Lit en continu le Redo Log Buffer (les reçus de modifications).          | Écrit dans les Redo Log Files.                                                                                                             |
-| CKPT               | Checkpoint      | Déclenche un point de contrôle : demande à DBWn d'écrire les blocs sales, puis enregistre la position (SCN) de l'avancement. Il ne réécrit lui-même aucun bloc de données.                              | Met à jour les structures de contrôle stockées en SGA.                 | Écrit le SCN dans les Control Files et l'en-tête des Datafiles.                                                                           |
-| SMON               | System Monitor  | Nettoie le système : récupération automatique de l'instance après un crash (au démarrage), coalescence de l'espace libre**dans les tablespaces (sur disque)** et nettoyage des segments temporaires. | Gère l'espace libre des structures globales de la SGA.                   | Lit les Redo Logs et applique la récupération (roll-forward) sur les Datafiles ; libère de l'espace disque.                              |
-| PMON               | Process Monitor | Nettoie les sessions en échec : si un processus client plante, il libère ses ressources et ses verrous. Dans les versions antérieures, il enregistrait aussi le service de la base auprès du Listener.      | Libère les verrous et la mémoire de session (UGA) bloqués dans la SGA. | Communique avec les autres processus du système ; enregistre les services. Souvent décrit comme non impliqué dans les écritures disque. |
-
 ![DBWn et LGWR](dbwn_lgwr.jpg)
 
 *Schéma : les deux processeurs d'écriture, DBWn (datafiles) et LGWR (Redo Log Files).*
 
-#### Zoom sur le fonctionnement de chaque processus
+### 10. Les 5 processus background : DBWn, LGWR, CKPT, SMON, PMON
 
-* **DBWn** : il ne travaille pas dans l'urgence. Il attend que le Buffer Cache soit trop plein de blocs modifiés, ou qu'un signal de CKPT lui demande de vider une partie de la mémoire vers les Datafiles.
-* **LGWR** : le processus le plus pressé et le plus critique. Il écrit dès qu'un utilisateur tape COMMIT, toutes les trois secondes, ou dès que le Redo Log Buffer est rempli au tiers (ou 1 Mo de redo, voir §17).
-* **CKPT** : il agit comme un chef d'orchestre du temps. Lors d'un checkpoint, il **demande** à DBWn d'écrire les blocs en retard, puis met à jour le numéro de séquence (SCN) dans le fichier de contrôle. Contrairement à DBWn, **CKPT n'écrit pas de blocs de données lui-même**.
-* **SMON** : si l'électricité est coupée, au redémarrage SMON se lève en premier. Il applique le journal de transaction (roll-forward) pour remettre la base dans l'état exact du crash. En tâche de fond, il concatène aussi les zones d'espace libre dans les tablespaces et nettoie les segments temporaires.
-* **PMON** : si un utilisateur débranche son câble réseau en pleine transaction, PMON détecte que le processus client est mort, effectue un ROLLBACK automatique et libère les lignes verrouillées pour les autres utilisateurs.
+Une instance Oracle ne se limite pas à de la mémoire : elle a besoin de **processus d'arrière-plan** qui travaillent en continu, sans que l'utilisateur les voie. Ils assurent trois missions : **écrire les données sur le disque**, **protéger la base contre les pannes** et **nettoyer** ce que les sessions laissent derrière elles.
+
+#### 1. Vue d'ensemble
+
+Pour comprendre leurs rôles, il faut se rappeler que l'instance fonctionne en RAM (la SGA) pour aller vite, alors que le disque garantit que les données survivent. Ces processus font le pont entre les deux.
+
+| Mission | Processus | En une phrase |
+| ------- | --------- | ------------- |
+| Écrire sur le disque | **DBWn** | Écrit les blocs de données modifiés dans les Datafiles. |
+| Écrire sur le disque | **LGWR** | Écrit le journal des modifications (redo) dans les Redo Log Files. |
+| Protéger contre les pannes | **CKPT** | Marque des points de contrôle pour raccourcir la récupération après un crash. |
+| Protéger contre les pannes | **SMON** | Répare la base au redémarrage après un crash. |
+| Nettoyer | **PMON** | Nettoie les sessions qui ont planté. |
+
+#### 2. Les processus d'écriture : DBWn et LGWR
+
+**DBWn (DataBase Writer, n = 1, 2, ...)**
+
+* **Rôle :** écrire les **blocs de données modifiés** de la RAM vers les Datafiles.
+* **SGA :** il parcourt le **Buffer Cache** à la recherche de blocs « sales » (*dirty buffers*), c'est-à-dire modifiés en mémoire mais pas encore écrits sur le disque.
+* **Disque :** il écrit dans les **Datafiles**.
+* **Quand :** il ne travaille pas dans l'urgence. Il agit lorsque le Buffer Cache est trop rempli de blocs modifiés et qu'il faut libérer de la place, ou quand CKPT le lui demande. L'écriture est **asynchrone** : l'utilisateur n'attend pas qu'elle soit terminée.
+* **Pourquoi pas d'écriture immédiate ?** Écrire dans les Datafiles à chaque modification serait lent (accès disque dispersés sur toute la base). Il est plus efficace de regrouper les écritures.
+
+**LGWR (Log Writer)**
+
+* **Rôle :** écrire le **journal des modifications** (redo) sur le disque, pour garantir la **durabilité** : une fois validée, une transaction ne doit jamais être perdue.
+* **SGA :** il lit en continu le **Redo Log Buffer**, qui contient les « reçus » de chaque modification.
+* **Disque :** il écrit dans les **Redo Log Files**.
+* **Quand :** c'est le processus le plus pressé et le plus critique. Il écrit :
+  * dès qu'un utilisateur exécute un **COMMIT** ;
+  * toutes les **3 secondes** ;
+  * quand le Redo Log Buffer est rempli au **tiers** (ou atteint 1 Mo de redo).
+* **Pourquoi LGWR et pas DBWn au COMMIT ?** Écrire le journal est rapide : il est écrit à la suite, de façon séquentielle, et contient uniquement les changements. Écrire les blocs de données est plus lent. Au COMMIT, seul le journal est donc écrit ; si la machine plante, il permet de **rejouer** les modifications au redémarrage. Les blocs de données seront écrits plus tard par DBWn.
+
+#### 3. Les processus de protection : CKPT et SMON
+
+**CKPT (Checkpoint)**
+
+* **Rôle :** déclencher les **points de contrôle** (*checkpoints*). Un checkpoint est un instant où l'on garantit que toutes les modifications antérieures à un certain moment sont bien écrites dans les Datafiles.
+* **Comment :** il **demande** à DBWn d'écrire les blocs sales, puis enregistre la position atteinte, le **SCN** (*System Change Number*, le numéro qui identifie chaque instant de la base).
+* **SGA :** il met à jour les structures de contrôle en SGA.
+* **Disque :** il écrit le SCN dans les **Control Files** et dans l'en-tête des **Datafiles**.
+* **Important :** CKPT **n'écrit lui-même aucun bloc de données** ; ce travail reste celui de DBWn. Il joue le rôle de chef d'orchestre.
+* **Pourquoi c'est utile :** après un crash, Oracle sait qu'il n'a à rejouer le journal qu'à partir du dernier checkpoint. Plus les checkpoints sont fréquents, plus la récupération est rapide.
+
+**SMON (System Monitor)**
+
+* **Rôle :** réparer et entretenir le système.
+* **Au redémarrage après un crash :** c'est lui qui se lève en premier. Il lit les **Redo Logs** et applique les modifications qui n'avaient pas encore atteint les Datafiles (**roll-forward**), pour remettre la base dans l'état exact du crash. C'est la **récupération automatique de l'instance**.
+* **En tâche de fond :**
+  * il **regroupe les zones d'espace libre** voisines dans les tablespaces (coalescence) pour en faire de plus grandes ;
+  * il **nettoie les segments temporaires** qui ne servent plus.
+* **SGA / Disque :** il gère l'espace libre des structures globales, lit les Redo Logs, applique la récupération sur les Datafiles et libère de l'espace disque.
+
+#### 4. Le processus de nettoyage : PMON
+
+**PMON (Process Monitor)**
+
+* **Rôle :** nettoyer après les sessions en échec.
+* **Exemple :** un utilisateur débranche son câble réseau en pleine transaction. PMON détecte que le processus client est mort, effectue un **ROLLBACK** automatique de sa transaction et **libère ses verrous**, pour que les autres utilisateurs ne restent pas bloqués sur les lignes verrouillées.
+* **SGA :** il libère les verrous et la mémoire de session (UGA) restés bloqués.
+* **Disque :** il n'est généralement pas impliqué dans les écritures disque.
+* **Note :** dans les versions antérieures, il enregistrait aussi le service de la base auprès du **Listener**.
+
+#### 5. Tableau récapitulatif
+
+| Processus | Nom complet | Rôle principal | Interaction avec la SGA (RAM) | Interaction avec le disque |
+| --------- | ----------- | -------------- | ----------------------------- | -------------------------- |
+| DBWn | DataBase Writer | Écrit les blocs modifiés vers le disque, de manière asynchrone. | Lit le Buffer Cache (blocs « sales »). | Écrit dans les Datafiles. |
+| LGWR | Log Writer | Écrit le journal de transaction dès un COMMIT (durabilité). | Lit le Redo Log Buffer. | Écrit dans les Redo Log Files. |
+| CKPT | Checkpoint | Déclenche les checkpoints : demande à DBWn d'écrire, puis enregistre le SCN. N'écrit aucun bloc lui-même. | Met à jour les structures de contrôle en SGA. | Écrit le SCN dans les Control Files et les en-têtes de Datafiles. |
+| SMON | System Monitor | Récupération après crash, coalescence de l'espace libre, nettoyage des segments temporaires. | Gère l'espace libre des structures globales. | Lit les Redo Logs, applique le roll-forward sur les Datafiles. |
+| PMON | Process Monitor | Nettoie les sessions en échec (rollback, libération des verrous). | Libère les verrous et la mémoire de session (UGA). | Généralement pas d'écriture disque. |
+
+#### 6. Comment ils travaillent ensemble : exemple d'un UPDATE
+
+1. L'utilisateur exécute un `UPDATE` : le bloc est modifié **dans le Buffer Cache** (il devient « sale ») et le changement est noté dans le **Redo Log Buffer**.
+2. L'utilisateur fait un `COMMIT` : **LGWR** écrit immédiatement le redo dans les **Redo Log Files**. La transaction est maintenant durable.
+3. Plus tard, **DBWn** écrit le bloc sale dans les **Datafiles**, à son rythme ou sur demande de **CKPT**.
+4. **CKPT** enregistre le SCN atteint dans les Control Files et les Datafiles.
+5. En cas de crash avant l'étape 3, **SMON** rejoue le redo au redémarrage et la modification n'est pas perdue.
+6. Si la session avait planté avant le `COMMIT`, **PMON** annule la transaction et libère ses verrous.
 
 ### 11. Une SGA, N PGA : première vue d'ensemble
 
@@ -452,12 +520,37 @@ La règle d'or est simple : **dans une instance, il y a toujours une seule et un
 
 *Schéma : carte mémoire processus (SGA partagée, PGA privées).*
 
-#### 1. L'analogie théâtrale
+#### 1. Vue d'ensemble : le rôle de chaque composant
 
-* **L'Instance = la scène de théâtre** : l'espace vivant, éphémère, en action. Tant que la pièce est jouée (l'instance démarrée), la scène existe. Si on éteint les feux, la scène redevient vide.
-* **Les Processus = les acteurs** : les entités physiques qui font le travail. Certains ont des rôles en arrière-plan (DBWn, LGWR, PMON sont la troupe technique), d'autres sont des processus serveurs dédiés engagés pour jouer le texte (les requêtes SQL) dicté par un spectateur (le client).
-* **La SGA = les décors et accessoires communs (sur la scène)** : un immense espace au milieu de la scène, auquel tous les acteurs accèdent en même temps. Si un acteur y dépose un accessoire (un bloc de données lu depuis le disque), un autre peut l'attraper immédiatement sans retourner dans les coulisses (le disque).
-* **La PGA = le script personnel et la loge de l'acteur** : chaque acteur possède sa propre loge privée et son carnet de notes. Un acteur ne peut pas entrer dans la loge d'un autre. Il y stocke ses données personnelles (variables de session) et y prépare ses répliques et ses mouvements complexes (tris, hachages).
+Une base de données Oracle en fonctionnement repose sur quatre composants qui travaillent ensemble.
+
+**L'instance** : c'est l'ensemble **mémoire + processus** qui s'exécute quand la base est démarrée. Elle est éphémère : elle n'existe qu'à l'exécution et disparaît à l'arrêt. Les données, elles, restent sur le disque (les fichiers de la base). L'instance est le moteur qui permet de les lire et de les modifier.
+
+**Les processus** : ce sont les programmes qui font réellement le travail. Ils se répartissent en deux catégories :
+
+* **Les processus background** (DBWn, LGWR, CKPT, SMON, PMON) : ils tournent en permanence en tâche de fond pour la maintenance de la base (écrire sur le disque, protéger contre les pannes, nettoyer). Ils ne sont liés à aucun utilisateur en particulier.
+* **Les processus serveurs** : ce sont les processus qui **exécutent les requêtes SQL** d'un client. Un processus serveur dédié est créé pour chaque session connectée ; il reçoit les requêtes du client, les traite et renvoie les résultats.
+
+**La SGA (System Global Area)** : c'est la zone de mémoire **partagée** par tous les processus de l'instance.
+
+* **Rôle :** garder en RAM les données et les informations utiles à tous (blocs de données lus depuis le disque, requêtes déjà analysées, journal en attente d'écriture).
+* **Bénéfice :** quand un processus lit un bloc depuis le disque, il le place dans la SGA. Les autres processus peuvent alors le réutiliser directement, sans refaire d'accès disque (lent).
+* **Contenu principal :** Buffer Cache (blocs de données), Shared Pool (requêtes analysées), Redo Log Buffer (journal des modifications).
+
+**La PGA (Program Global Area)** : c'est la zone de mémoire **privée** de chaque processus serveur.
+
+* **Rôle :** stocker ce qui est propre à **une seule session** : son état (variables de session, droits, curseurs ouverts) et l'espace de travail de ses requêtes (tris, jointures par hachage).
+* **Bénéfice :** aucun autre processus ne peut y accéder, ce qui isole les sessions entre elles ; et comme elle est privée, elle n'a pas besoin des verrous nécessaires pour les zones partagées.
+
+**Résumé :**
+
+| Composant | Nature | Partagé ? | Rôle principal |
+| --------- | ------ | --------- | -------------- |
+| Instance | Mémoire + processus | | Le moteur qui fait fonctionner la base (éphémère) |
+| Processus background | Processus | Un jeu commun à toute l'instance | Maintenance : écriture disque, récupération, nettoyage |
+| Processus serveur | Processus | Un par session | Exécuter les requêtes SQL du client |
+| SGA | Mémoire | Oui, par tous les processus | Cache commun des données et du journal |
+| PGA | Mémoire | Non, privée à chaque processus serveur | État de session et zones de travail (tri, hachage) |
 
 #### 2. Le modèle : 1 SGA, N PGA
 
