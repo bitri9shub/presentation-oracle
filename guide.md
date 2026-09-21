@@ -326,8 +326,29 @@ Ce sont des zones temporaires, allouées pendant l'exécution d'une requête et 
   *Pourquoi :* pour joindre deux tables, Oracle construit en mémoire une table de hachage (une sorte d'index temporaire) à partir de la plus petite des deux. Il parcourt ensuite l'autre table et, pour chaque ligne, retrouve directement la correspondance dans la table de hachage, sans balayer toute la première table à chaque fois.
   *Exemple :* `SELECT * FROM commandes c JOIN clients cl ON c.client_id = cl.id;`
 
-* **La zone de fusion de bitmaps (Bitmap Merge Area)** : utilisée pour combiner **plusieurs index bitmap** dans une même requête.
-  *Pourquoi :* un index bitmap représente, pour une valeur, les lignes concernées sous forme de suites de 0 et de 1. Quand la requête a plusieurs conditions (`WHERE sexe = 'F' AND ville = 'Agadir'`), Oracle combine les bitmaps de chaque condition avec des opérations logiques (AND, OR) pour trouver rapidement les lignes qui les satisfont toutes, avant de lire la table.
+* **La zone de fusion de bitmaps (Bitmap Merge Area)** : utilisée pour combiner **plusieurs index bitmap** quand une requête a plusieurs conditions.
+
+  *C'est quoi un index bitmap ?* Pour chaque valeur d'une colonne, l'index garde une suite de 0 et de 1 : un bit par ligne de la table (`1` = la ligne a cette valeur, `0` = non). Il convient aux colonnes qui ont peu de valeurs différentes (sexe, ville, statut...).
+
+  *Exemple.* Table de 6 personnes, avec les bitmaps des deux valeurs recherchées :
+
+  | Ligne | 1 | 2 | 3 | 4 | 5 | 6 |
+  | ----- | - | - | - | - | - | - |
+  | sexe | F | H | F | F | H | F |
+  | ville | Agadir | Agadir | Rabat | Agadir | Agadir | Agadir |
+  | **Bitmap `sexe = 'F'`** | 1 | 0 | 1 | 1 | 0 | 1 |
+  | **Bitmap `ville = 'Agadir'`** | 1 | 1 | 0 | 1 | 1 | 1 |
+
+  *Le rôle de la Bitmap Merge Area.* Pour `WHERE sexe = 'F' AND ville = 'Agadir'`, Oracle charge les deux bitmaps dans cette zone et les combine avec un `AND` bit à bit (`OR` si la requête utilise `OR`) :
+
+```
+  sexe = 'F'          1 0 1 1 0 1
+  ville = 'Agadir'    1 1 0 1 1 1
+  ---------------------------- AND
+  résultat            1 0 0 1 0 1
+```
+
+  Les `1` du résultat indiquent les lignes recherchées (1, 4 et 6) : Oracle lit directement ces lignes, sans vérifier toute la table. C'est efficace car les opérations sur des bits sont extrêmement rapides.
 
 **B. La mémoire de session et la Private SQL Area**
 
