@@ -308,9 +308,51 @@ Lorsque l'application de votre utilisateur se connecte à la base, une chaîne e
 
 #### 2. Que contient la PGA d'un processus dédié ?
 
-* **La zone de tri (Sort Area)** : si l'utilisateur fait un ORDER BY ou un GROUP BY sur un gros volume, le processeur trie les lignes dans cette PGA.
-* **La zone de hachage (Hash Area)** : utilisée pour lier deux tables rapidement lors d'une jointure (HASH JOIN).
-* **L'état de la session** : variables de session SQL, historique des curseurs ouverts, droits de l'utilisateur.
+La **PGA** (*Program Global Area*) est la mémoire **privée** d'un processus serveur Oracle : chaque session a la sienne, et elle n'est pas partagée avec les autres. Elle est utile pour tout ce qui est propre à une seule session : ses calculs temporaires et son état. Le schéma la divise en deux grandes familles : les **SQL Work Areas** (zones de travail pour les opérations lourdes) et la mémoire de session avec la **Private SQL Area**.
+
+![Contenu de la PGA](pga_content.png)
+
+*Schéma : la répartition interne d'une PGA.*
+
+**A. Les SQL Work Areas : les zones de travail des opérations SQL**
+
+Ce sont des zones temporaires, allouées pendant l'exécution d'une requête et libérées ensuite. Leur taille conditionne les performances : si elles sont trop petites, l'opération déborde sur le disque (espace temporaire), ce qui est bien plus lent.
+
+* **La zone de tri (Sort Area)** : utilisée quand une requête doit **ordonner ou regrouper** des lignes (`ORDER BY`, `GROUP BY`, `DISTINCT`, création d'index).
+  *Pourquoi :* pour trier, il faut avoir toutes les lignes sous la main. Le processus les charge dans cette zone, les trie en mémoire (rapide), puis renvoie le résultat. Si le volume dépasse la zone, Oracle trie par morceaux qu'il écrit sur le disque, puis les fusionne : c'est beaucoup plus lent.
+  *Exemple :* `SELECT * FROM clients ORDER BY nom;`
+
+* **La zone de hachage (Hash Area)** : utilisée pour les **jointures par hachage** (`HASH JOIN`).
+  *Pourquoi :* pour joindre deux tables, Oracle construit en mémoire une table de hachage (une sorte d'index temporaire) à partir de la plus petite des deux. Il parcourt ensuite l'autre table et, pour chaque ligne, retrouve directement la correspondance dans la table de hachage, sans balayer toute la première table à chaque fois.
+  *Exemple :* `SELECT * FROM commandes c JOIN clients cl ON c.client_id = cl.id;`
+
+* **La zone de fusion de bitmaps (Bitmap Merge Area)** : utilisée pour combiner **plusieurs index bitmap** dans une même requête.
+  *Pourquoi :* un index bitmap représente, pour une valeur, les lignes concernées sous forme de suites de 0 et de 1. Quand la requête a plusieurs conditions (`WHERE sexe = 'F' AND ville = 'Agadir'`), Oracle combine les bitmaps de chaque condition avec des opérations logiques (AND, OR) pour trouver rapidement les lignes qui les satisfont toutes, avant de lire la table.
+
+**B. La mémoire de session et la Private SQL Area**
+
+* **La mémoire de session (Session Memory)** : elle contient l'**état de la connexion** de l'utilisateur.
+  *Contenu :* variables de session (paramètres, variables de package), informations de connexion, droits et rôles de l'utilisateur.
+  *Pourquoi :* Oracle doit se souvenir de qui est connecté et dans quel contexte, entre chaque requête envoyée.
+
+* **La Private SQL Area (zone SQL privée)** : elle contient les informations propres à **chaque instruction SQL en cours de traitement** par la session. Elle se subdivise en deux parties :
+  * **La zone persistante (Persistent Area)** : elle contient les informations qui **restent tant que le curseur est ouvert**, comme les valeurs des variables de liaison (*bind variables*) associées à la requête.
+    *Pourquoi :* si la même requête est ré-exécutée plusieurs fois dans un curseur ouvert, ces informations n'ont pas besoin d'être reconstruites à chaque fois.
+  * **La zone d'exécution (Runtime Area)** : elle contient l'**état de l'exécution en cours**, comme la progression du parcours des lignes ou les résultats intermédiaires.
+    *Pourquoi :* elle n'existe que pendant l'exécution de la requête et est libérée dès qu'elle est terminée (pour un `SELECT`, après la lecture de toutes les lignes ou la fermeture du curseur).
+
+  Un **curseur** est la structure qui permet à la session de gérer une requête et de parcourir ses résultats ligne par ligne. C'est lui qui utilise cette Private SQL Area.
+
+**Résumé :**
+
+| Zone | Rôle | Durée de vie |
+| ---- | ---- | ------------ |
+| Sort Area | Trier / regrouper des lignes | Le temps de l'opération |
+| Hash Area | Joindre deux tables par hachage | Le temps de l'opération |
+| Bitmap Merge Area | Combiner plusieurs index bitmap | Le temps de l'opération |
+| Session Memory | État de la session (variables, droits) | Toute la session |
+| Persistent Area | Bind variables et infos du curseur | Tant que le curseur est ouvert |
+| Runtime Area | État de l'exécution en cours | Le temps de l'exécution |
 
 #### 3. Avantages et limites du serveur dédié
 
