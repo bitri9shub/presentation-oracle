@@ -615,15 +615,9 @@ Alors que le Buffer Cache stocke des données brutes, le Shared Pool est le « c
 
 #### 1. Le Library Cache (le cache de code et de plans)
 
-Son but : éviter au processeur de refaire les étapes lourdes d'analyse (parsing) d'une requête SQL. À la réception d'une requête, le processeur serveur effectue deux opérations :
+Son but : éviter au processeur de refaire les étapes lourdes d'analyse (parsing) d'une requête SQL déjà rencontrée. Les requêtes analysées y sont stockées sous forme de *Shared SQL Areas* : le texte SQL exact et le **plan d'exécution** (le chemin le plus rapide, calculé par l'optimiseur).
 
-1. **L'analyse syntaxique et sémantique** : vérifier que la commande est correcte et que l'utilisateur a les droits requis.
-2. **L'optimisation** : calculer le chemin le plus rapide (quel index, quelle table en premier). Le résultat est le **plan d'exécution**.
-
-Ces informations sont stockées dans le Library Cache sous forme de *Shared SQL Areas*.
-
-* **Hard Parse (analyse lourde)** : si la requête n'est pas dans le Library Cache, tout doit être recalculé depuis zéro. Très coûteux en CPU.
-* **Soft Parse (analyse légère)** : si une requête rigoureusement identique arrive, le système la trouve immédiatement, saute l'optimisation et réutilise le plan existant. Accès quasi instantané.
+> Le détail de l'analyse — complète (hard parse) ou légère (soft parse) — est traité en §16.
 
 #### 2. Le Row Cache / Data Dictionary Cache (le cache des structures)
 
@@ -754,10 +748,7 @@ Avant son introduction, les opérations lourdes d'arrière-plan demandaient leur
 
 **A. Architecture serveur partagé (Shared Server)**
 
-En mode serveur partagé, la mémoire de session de l'utilisateur — l'**UGA** — ne peut pas rester dans la PGA privée d'un seul processus : elle doit vivre dans la SGA partagée.
-
-* **Sans Large Pool :** l'UGA est placée dans le **Shared Pool**, qu'elle fragmente en continu au rythme des connexions/déconnexions.
-* **Avec le Large Pool :** l'UGA (variables de session, contextes de tri, curseurs ouverts) est stockée dans le **Large Pool**, ce qui garde le Shared Pool propre et rapide.
+En mode serveur partagé, l'**UGA** (mémoire de session) est stockée ici plutôt que dans le Shared Pool : voir §9.2 pour l'explication complète.
 
 **B. Exécution parallèle (Parallel Query)**
 
@@ -828,60 +819,6 @@ La PGA (Program Global Area) est exactement l'opposé de la SGA partagée. Là o
 #### 3. Serveur dédié et menace linéaire
 
 Ce coût linéaire explique pourquoi les bases ne montent pas en charge indéfiniment en mode dédié. Une pointe soudaine de 5 000 utilisateurs peut faire dépasser la RAM physique : l'OS se met alors à échanger des blocs sur le disque dur (swapping) — ou le *Linux Out-Of-Memory (OOM) Killer* plante brutalement l'instance. Pour gérer ce coût, les DBA modernes utilisent `PGA_AGGREGATE_TARGET` afin que l'instance réduise automatiquement les zones de tri des sessions individuelles quand la somme des PGA menace de dépasser la RAM.
-
-### 21. Composants : Session Memory, Private SQL Area, SQL Work Areas
-
-La mémoire privée d'un processus — la PGA — est divisée en zones fonctionnelles très spécialisées. Contrairement aux pools partagés de la SGA, ces composants sont entièrement dédiés à la gestion de l'état d'une seule session, de ses curseurs actifs et de ses opérations lourdes (tris, hachages). La structure se décompose en trois couches principales.
-
-![Contenu de la PGA](pga_content.png)
-
-*Schéma : la répartition interne d'une PGA.*
-
-#### 1. La Session Memory (la carte d'identité)
-
-La mémoire de base qui suit le profil de connexion et l'état de l'utilisateur.
-
-* **Ce qu'elle stocke :** variables de session, privilèges de connexion, rôles actifs, variables de paquet PL/SQL (le cas échéant).
-* **Où elle vit :** en serveur dédié, elle reste dans la PGA privée ; en serveur partagé, cette couche migre vers la SGA (Large Pool, sinon Shared Pool) — c'est la fameuse UGA (§9).
-
-#### 2. La Private SQL Area (le plan prévu pour un curseur)
-
-Chaque fois qu'une session exécute une requête SQL, le processus crée une Private SQL Area qui relie cette session au plan d'exécution global stocké dans le Library Cache de la SGA. Elle se divise en deux parties aux durées de vie différentes :
-
-* **La zone persistante (statique) :** valeurs des variables liées (bind), définitions des types de données, métadonnées de la requête. Elle vit aussi longtemps que le curseur reste ouvert (tant que l'application garde la déclaration de la requête).
-* **La zone runtime (dynamique) :** état d'exécution — combien de lignes ont déjà été extraites, à quelle étape du plan on en est. Elle est libérée dès que la requête se termine ou que la dernière ligne est extraite, même si le curseur reste ouvert.
-
-#### 3. Les SQL Work Areas (la grosse machinerie)
-
-La partie la plus volatile et la plus gourmande de la PGA. Elle est allouée dynamiquement dès qu'une requête nécessite une manipulation de données lourde en mémoire.
-
-* **Sort Area :** allouée pour un ORDER BY, un GROUP BY ou un DISTINCT. La CPU trie entièrement les lignes dans cet espace privé pour éviter le disque.
-* **Hash Area :** utilisée pour un HASH JOIN. Pour lier deux grandes tables, le processus lit la plus petite, construit dans cet espace une table de hachage haute vitesse, puis « streame » la seconde table contre elle pour un appariement quasi instantané.
-* **Bitmap Merge Area :** uniquement pour les requêtes qui utilisent des index bitmap : on récupère les chemins de bits de plusieurs scans d'index et on les fusionne en mémoire pour résoudre les conditions AND/OR avant d'extraire les lignes.
-
-#### Récapitulatif de l'allocation mémoire de la PGA
-
-```
-┌────────────────────────────────────────────────────────┐
-│ PGA (Mémoire privée de session)                        │
-├────────────────────────────────────────────────────────┤
-│ 1. SESSION MEMORY (Connexions, état PL/SQL, variables) │
-├────────────────────────────────────────────────────────┤
-│ 2. PRIVATE SQL AREA                                    │
-│   ┌──────────────────────────────────────────────────┐ │
-│   │ Zone persistante (valeurs bind, types de données)│ │
-│   ├──────────────────────────────────────────────────┤ │
-│   │ Zone runtime (compteurs de lignes, état execution)│ │
-│   └──────────────────────────────────────────────────┘ │
-├────────────────────────────────────────────────────────┤
-│ 3. SQL WORK AREAS                                      │
-│   ┌───────────────┐ ┌───────────────┐ ┌──────────────┐ │
-│   │   Sort Area   │ │   Hash Area   │ │ Bitmap Merge │ │
-│   └───────────────┘ └───────────────┘ └──────────────┘ │
-└────────────────────────────────────────────────────────┘
-```
-
-Si le volume de données d'un tri ou d'un hachage dépasse la taille maximale autorisée pour les SQL Work Areas, le processus passe en mode One-Pass ou Multi-Pass : il fige l'allocation mémoire et fait déborder les lignes excédentaires sur le disque, dans le **tablespace TEMP** (voir §31).
 
 ### 22. Work Areas : optimal (RAM) / one-pass / multi-pass
 
